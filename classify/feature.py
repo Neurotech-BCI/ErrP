@@ -133,17 +133,10 @@ class FeatureWrapper():
 
 
     
-    def compute_features(self,data,data_idx,sfreq,channel_indices,desired_features = ["alpha_bandpower"]):
-        if len(self.cache) <= data_idx:
-            self.cache.append({})
+    def compute_features(self, data, sfreq, desired_features = ["alpha_bandpower"]):
         features = []
-        
         for feature in desired_features:
-            if feature in self.cache[data_idx]:
-                features.append(self.cache[data_idx][feature])
-            else:
-                calculated_feature = (self.func_dict[feature](data,sfreq))
-                features.append(calculated_feature)
-                self.cache[data_idx][feature] = calculated_feature
+            calculated_feature = (self.func_dict[feature](data, sfreq))
+            features.append(calculated_feature)
         features = np.stack(features,axis=1)
         return features
