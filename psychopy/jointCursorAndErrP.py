@@ -1,19 +1,27 @@
 # Open this with PsychoPy
 from psychopy import visual, core, event
 import random
-
+import serial 
 # --- Configuration ---
 NUM_TRIALS = 5
 WIN_SIZE = [1000, 600]
 TARGET_OFFSET = 0.6  # Normalized units (0.6 is 60% of the way to the edge)
-ACCURACY_RATE = 0.9 
+ACCURACY_RATE = 0.5 
 
 # --- Timing Configuration (Seconds) ---
 TEXT_READ_DELAY = 2.0   # Delay between first text appearing and action starting
-TEXT_READ_DELAY2 = 1.0   # Delay between second text appearing and action starting
 IMAGERY_DURATION = 2.0  # How long the target flashes
 MOVE_DURATION = 1.0     # How long the cursor takes to move
 ITI_DURATION = 0.5      # Inter-trial interval
+
+# Trigger Hub Config
+PORT = 'COM5'
+CURSOR_TRIGGER = 1
+ERRP_TRIGGER = 2
+
+mmbts = serial.Serial()
+mmbts.port = PORT 
+mmbts.open()
 
 # --- Setup Window ---
 win = visual.Window(size=WIN_SIZE, color='black', units='norm', fullscr=False)
@@ -79,26 +87,12 @@ for trial in range(NUM_TRIALS):
     instr_text.draw()
     win.flip()
     
+    # Write event trigger for target appearing
+    mmbts.write(bytes([CURSOR_TRIGGER]))
+    
     # Hold the flash
     core.wait(IMAGERY_DURATION)
-    
-    # 4. PART C: MOVEMENT INSTRUCTION (Text Only)
-    # -------------------------------------------
-    instr_text.text = "System is guessing your thought..."
-    
-    # Turn off flash
-    target_left.fillColor = None
-    target_right.fillColor = None
-    
-    # Draw scene
-    target_left.draw()
-    target_right.draw()
-    cursor.draw()
-    instr_text.draw()
-    win.flip()
-    
-    # Wait for user to read
-    core.wait(TEXT_READ_DELAY2)
+
 
     # 5. PART D: MOVEMENT ACTION (Animation)
     # --------------------------------------
@@ -106,6 +100,9 @@ for trial in range(NUM_TRIALS):
     end_pos = -TARGET_OFFSET if move_side == 'left' else TARGET_OFFSET
     
     move_clock = core.Clock()
+    
+    # Write Errp event trigger
+    mmbts.write(bytes([ERRP_TRIGGER]))
     
     while move_clock.getTime() < MOVE_DURATION:
         t = move_clock.getTime()
@@ -124,9 +121,18 @@ for trial in range(NUM_TRIALS):
             win.close()
             core.quit()
 
+    # Turn off flash
+    target_left.fillColor = None
+    target_right.fillColor = None
+    
+    # Draw scene
+    target_left.draw()
+    target_right.draw()
+    cursor.draw()
+    instr_text.draw()
+    win.flip()
     # 6. INTER-TRIAL INTERVAL
     # -----------------------
-    win.flip() # Clear screen
     core.wait(ITI_DURATION)
 
 # --- Cleanup ---
