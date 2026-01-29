@@ -15,9 +15,10 @@ ITI_DURATION = 2.0      # Inter-trial interval
 
 # Trigger Hub Config
 PORT = 'COM5'
-CURSOR_TRIGGER = 1
-NO_ERROR_TRIGGER = 2
-ERRP_TRIGGER = 3
+LEFT_TRIGGER = 1
+RIGHT_TRIGGER = 2
+NO_ERROR_TRIGGER = 3
+ERRP_TRIGGER = 4
 
 mmbts = serial.Serial()
 mmbts.port = PORT 
@@ -46,7 +47,7 @@ for trial in range(NUM_TRIALS):
     # 1. SETUP LOGIC
     # --------------
     target_side = random.choice(['left', 'right'])
-    
+    side_label = LEFT_TRIGGER if target_side == 'left' else RIGHT_TRIGGER
     # Determine movement logic
     if random.random() < ACCURACY_RATE:
         move_side = target_side
@@ -90,7 +91,7 @@ for trial in range(NUM_TRIALS):
     win.flip()
     
     # Write event trigger for target appearing
-    mmbts.write(bytes([CURSOR_TRIGGER]))
+    mmbts.write(bytes([side_label]))
     
     # Hold the flash
     core.wait(IMAGERY_DURATION)
