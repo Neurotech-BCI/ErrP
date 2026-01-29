@@ -3,21 +3,21 @@ from psychopy import visual, core, event
 import random
 import serial 
 # --- Configuration ---
-NUM_TRIALS = 5
+NUM_TRIALS = 50
 WIN_SIZE = [1000, 600]
 TARGET_OFFSET = 0.6  # Normalized units (0.6 is 60% of the way to the edge)
-ACCURACY_RATE = 0.5 
+ACCURACY_RATE = 0.75
 
 # --- Timing Configuration (Seconds) ---
-TEXT_READ_DELAY = 2.0   # Delay between first text appearing and action starting
 IMAGERY_DURATION = 2.0  # How long the target flashes
 MOVE_DURATION = 1.0     # How long the cursor takes to move
-ITI_DURATION = 0.5      # Inter-trial interval
+ITI_DURATION = 2.0      # Inter-trial interval
 
 # Trigger Hub Config
 PORT = 'COM5'
 CURSOR_TRIGGER = 1
-ERRP_TRIGGER = 2
+NO_ERROR_TRIGGER = 2
+ERRP_TRIGGER = 3
 
 mmbts = serial.Serial()
 mmbts.port = PORT 
@@ -50,8 +50,10 @@ for trial in range(NUM_TRIALS):
     # Determine movement logic
     if random.random() < ACCURACY_RATE:
         move_side = target_side
+        label = NO_ERROR_TRIGGER
     else:
         move_side = 'left' if target_side == 'right' else 'right'
+        label = ERRP_TRIGGER
 
     # 2. PART A: IMAGERY INSTRUCTION (Text Only)
     # ------------------------------------------
@@ -70,7 +72,7 @@ for trial in range(NUM_TRIALS):
     win.flip()
     
     # Wait for user to read
-    core.wait(TEXT_READ_DELAY)
+    core.wait(random.uniform(1.5, 2.5))
 
     # 3. PART B: IMAGERY ACTION (Flash)
     # ---------------------------------
@@ -102,7 +104,7 @@ for trial in range(NUM_TRIALS):
     move_clock = core.Clock()
     
     # Write Errp event trigger
-    mmbts.write(bytes([ERRP_TRIGGER]))
+    mmbts.write(bytes([label]))
     
     while move_clock.getTime() < MOVE_DURATION:
         t = move_clock.getTime()
