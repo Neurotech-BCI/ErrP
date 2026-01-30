@@ -1,7 +1,8 @@
 # Open this with PsychoPy
 from psychopy import visual, core, event
 import random
-import serial 
+import serial
+
 # --- Configuration ---
 NUM_TRIALS = 50
 WIN_SIZE = [1000, 600]
@@ -21,7 +22,7 @@ NO_ERROR_TRIGGER = 3
 ERRP_TRIGGER = 4
 
 mmbts = serial.Serial()
-mmbts.port = PORT 
+mmbts.port = PORT
 mmbts.open()
 
 # --- Setup Window ---
@@ -30,96 +31,104 @@ win = visual.Window(size=WIN_SIZE, color='black', units='norm', fullscr=False)
 # --- Define Stimuli ---
 cursor = visual.Circle(win, radius=0.05, fillColor='white', lineColor='white', pos=(0, 0))
 
-target_left = visual.Circle(win, radius=0.10, fillColor=None, lineColor='white', 
+target_left = visual.Circle(win, radius=0.10, fillColor=None, lineColor='white',
                             lineWidth=3, pos=(-TARGET_OFFSET, 0))
-target_right = visual.Circle(win, radius=0.10, fillColor=None, lineColor='white', 
+target_right = visual.Circle(win, radius=0.10, fillColor=None, lineColor='white',
                              lineWidth=3, pos=(TARGET_OFFSET, 0))
 
 instr_text = visual.TextStim(win, text="", pos=(0, 0.6), height=0.12, wrapWidth=1.8)
 
 # --- Main Trial Loop ---
 for trial in range(NUM_TRIALS):
-    
-    # Check for quit early
+
     if 'escape' in event.getKeys():
         break
 
     # 1. SETUP LOGIC
-    # --------------
     target_side = random.choice(['left', 'right'])
-    side_label = LEFT_TRIGGER if target_side == 'left' else RIGHT_TRIGGER
-    # Determine movement logic
+    side_trigger = LEFT_TRIGGER if target_side == 'left' else RIGHT_TRIGGER
+
     if random.random() < ACCURACY_RATE:
         move_side = target_side
-        label = NO_ERROR_TRIGGER
+        outcome_trigger = NO_ERROR_TRIGGER
     else:
         move_side = 'left' if target_side == 'right' else 'right'
-        label = ERRP_TRIGGER
+        outcome_trigger = ERRP_TRIGGER
 
     # 2. PART A: IMAGERY INSTRUCTION (Text Only)
-    # ------------------------------------------
     instr_text.text = "Target about to flash!\nWhen it does, imagine moving the cursor to it."
-    
-    # Ensure targets are neutral (no flash yet)
+
     target_left.fillColor = None
     target_right.fillColor = None
     cursor.pos = (0, 0)
-    
-    # Draw scene
+
     target_left.draw()
     target_right.draw()
     cursor.draw()
     instr_text.draw()
     win.flip()
-    
-    # Wait for user to read
+
     core.wait(random.uniform(1.5, 2.5))
 
-    # 3. PART B: IMAGERY ACTION (Flash)
-    # ---------------------------------
-    # Set flash color
+    # 3. PART B: IMAGERY ACTION (Flash) + LEFT/RIGHT trigger aligned to flash flip
     if target_side == 'left':
         target_left.fillColor = 'green'
+        target_right.fillColor = None
     else:
         target_right.fillColor = 'green'
-        
-    # Draw scene with flash
+        target_left.fillColor = None
+
     target_left.draw()
     target_right.draw()
     cursor.draw()
     instr_text.draw()
+
+    # Send cue trigger exactly on the flip that shows the flash
+    win.callOnFlip(mmbts.write, bytes([side_trigger]))
     win.flip()
-    
-    # Write event trigger for target appearing
-    mmbts.write(bytes([side_label]))
-    
-    # Hold the flash
+
     core.wait(IMAGERY_DURATION)
 
-
-    # 5. PART D: MOVEMENT ACTION (Animation)
-    # --------------------------------------
-    start_pos = 0 
+    # 4. MOVEMENT ACTION (Animation) + outcome trigger aligned to FIRST movement flip
+    start_pos = 0.0
     end_pos = -TARGET_OFFSET if move_side == 'left' else TARGET_OFFSET
-    
+
+    # ---- First movement frame (separate) ----
+    # Start a clock *before* scheduling the first movement flip
     move_clock = core.Clock()
-    
-    # Write Errp event trigger
-    mmbts.write(bytes([label]))
-    
-    while move_clock.getTime() < MOVE_DURATION:
+
+    # Compute a tiny positive t for the first movement frame so cursor actually moves on that first flip.
+    # Using the monitor frame period is a good approximation; if unavailable, fall back to ~1/60.
+    frame_period = win.monitorFramePeriod if win.monitorFramePeriod else (1.0 / 60.0)
+    t0 = frame_period
+
+    current_x = start_pos + (end_pos - start_pos) * (t0 / MOVE_DURATION)
+    cursor.pos = (current_x, 0)
+
+    target_left.draw()
+    target_right.draw()
+    cursor.draw()
+    instr_text.draw()
+
+    # Send outcome trigger exactly on the flip that initiates visible movement
+    win.callOnFlip(mmbts.write, bytes([outcome_trigger]))
+    win.flip()
+
+    # ---- Remaining movement frames ----
+    while True:
         t = move_clock.getTime()
-        
-        # Calculate position: start + (distance * (time / duration))
+        if t >= MOVE_DURATION:
+            break
+
         current_x = start_pos + (end_pos - start_pos) * (t / MOVE_DURATION)
         cursor.pos = (current_x, 0)
-        
+
         target_left.draw()
         target_right.draw()
         cursor.draw()
         instr_text.draw()
         win.flip()
-        
+
         if 'escape' in event.getKeys():
             win.close()
             core.quit()
@@ -127,15 +136,13 @@ for trial in range(NUM_TRIALS):
     # Turn off flash
     target_left.fillColor = None
     target_right.fillColor = None
-    
-    # Draw scene
+
     target_left.draw()
     target_right.draw()
     cursor.draw()
     instr_text.draw()
     win.flip()
-    # 6. INTER-TRIAL INTERVAL
-    # -----------------------
+
     core.wait(ITI_DURATION)
 
 # --- Cleanup ---
