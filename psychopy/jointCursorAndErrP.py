@@ -148,3 +148,5 @@ for trial in range(NUM_TRIALS):
 # --- Cleanup ---
 win.close()
 core.quit()
+mmbts.close()
+
