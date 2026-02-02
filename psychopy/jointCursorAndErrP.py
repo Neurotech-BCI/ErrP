@@ -5,7 +5,7 @@ import serial
 
 # --- Configuration ---
 NUM_TRIALS = 50
-WIN_SIZE = [1000, 600]
+WIN_SIZE = [1000, 600]  # not used anymore because of fullscreen
 TARGET_OFFSET = 0.6  # Normalized units (0.6 is 60% of the way to the edge)
 ACCURACY_RATE = 0.75
 
@@ -26,7 +26,8 @@ mmbts.port = PORT
 mmbts.open()
 
 # --- Setup Window ---
-win = visual.Window(size=WIN_SIZE, color='black', units='norm', fullscr=False)
+#win = visual.Window(size=WIN_SIZE, color='black', units='norm', fullscr=False)
+win = visual.Window(color='black', units='norm', fullscr=True)
 
 # --- Define Stimuli ---
 cursor = visual.Circle(win, radius=0.05, fillColor='white', lineColor='white', pos=(0, 0))
