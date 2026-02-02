@@ -4,7 +4,7 @@ import random
 import serial
 
 # --- Configuration ---
-NUM_TRIALS = 3
+NUM_TRIALS = 50
 WIN_SIZE = [1000, 600]  # not used anymore because of fullscreen
 TARGET_OFFSET = 0.6  # Normalized units (0.6 is 60% of the way to the edge)
 ACCURACY_RATE = 0.75
@@ -15,7 +15,7 @@ MOVE_DURATION = 1.0     # How long the cursor takes to move
 ITI_DURATION = 2.0      # Inter-trial interval
 
 RUNS_PER_LOOP = 3 # each run is 50 trials (or whatever NUM_TRIALS is set to)
-BREAK_DURATION = 5 # 60 second break between runs
+BREAK_DURATION = 60 # 60 second break between runs
 
 # Trigger Hub Config
 PORT = 'COM5'
