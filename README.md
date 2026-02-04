@@ -1,1 +1,6 @@
-# ErrP
+# Error-Related Potentials: Neurotech@USC Poster Project
+Welcome! This is the official repository for the Error-Related Potentials (ErrP) project for Neurotech@USC, which will be submitted to the 2026 California Neurotechnology Conference in Berkeley.
+### Project Description
+The aim of this project is to create both a universal and personal ErrP detector, and play around with cutting edge methods. An ErrP is your brain's response to perceiving an error, whether made by you or someone else (or a machine). This happens when you see a basketball player travel, when you catch a typo, or when you notice that you've said the wrong thing the moment the words leave your mouth. It also happens when you see a robot make an error. Hence, if detected accurately and quickly, it can be a great learning signal, allowing for immediate reinforcement.
+
+Current literature suggests that ErrPs are detectable reliably, accurately, and asynchronously. This means that accuracy of model outputs can be monitored by human observers in a way which will 'adapt' the models to the observers' preferences. While much of the existing literature focused on personalized models, we wanted to also look into general models, as there have been papers suggesting generalizability, 
