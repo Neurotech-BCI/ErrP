@@ -45,10 +45,6 @@ instruction_text = visual.TextStim(win, text="", color='white')
 all_trial_events = []
 
 def generate_delayed_trajectory(static_dur, move_dur, fps):
-    """
-    Generates a trajectory that stays static for `static_dur` and then 
-    moves for `move_dur` using the 1D Left/Right sine wave logic.
-    """
     # 1. Generate the Movement Phase
     n_frames_move = int(move_dur * fps)
     t_move = np.linspace(0, move_dur, n_frames_move)
@@ -163,12 +159,4 @@ for trial_idx in range(1, NUM_TRIALS + 1):
             break
 
 win.close()
-
-# --- Output Results ---
-print(f"{'Trial':<6} | {'Time (s)':<10} | {'Event':<20} | {'Direction'}")
-print("-" * 55)
-for log in all_trial_events:
-    # Filter out initial start logs if you only want movement specific ones
-    print(f"{log['trial']:<6} | {log['time']:<10.4f} | {log['event']:<20} | {log['direction']}")
-
 core.quit()
