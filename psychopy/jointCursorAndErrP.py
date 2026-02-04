@@ -17,8 +17,8 @@ ITI_DURATION = 2.0      # Inter-trial interval
 RUNS_PER_LOOP = 3 # each run is 50 trials (or whatever NUM_TRIALS is set to)
 BREAK_DURATION = 60 # 60 second break between runs
 
-# Trigger Hub Config
-PORT = 'COM5'
+# Trigger Hub Config - use COM3 on the Ahmanson desktop
+PORT = 'COM3'
 LEFT_TRIGGER = 1
 RIGHT_TRIGGER = 2
 REST_TRIGGER = 3
