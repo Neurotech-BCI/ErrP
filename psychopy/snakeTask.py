@@ -3,7 +3,7 @@ import numpy as np
 import serial
 
 # --- Configuration ---
-NUM_TRIALS = 2
+NUM_TRIALS = 8
 STATIC_DURATION = 2.0   # seconds (No movement)
 MOVE_DURATION = 33.0    # seconds (Movement)
 TRIAL_DURATION = STATIC_DURATION + MOVE_DURATION
