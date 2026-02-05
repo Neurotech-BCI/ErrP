@@ -33,7 +33,6 @@ mmbts.port = PORT
 mmbts.open()
 
 # --- Setup Window ---
-win = visual.Window(size=WIN_SIZE, color='black', units='norm', fullscr=False)
 win = visual.Window(color='black', units='norm', fullscr=True)
 
 # --- Define Stimuli ---
