@@ -1,6 +1,7 @@
 from psychopy import visual, core, event, gui
 import numpy as np
 import time
+import serial
 
 # --- Configuration ---
 WIN_SIZE = [1200, 800]
@@ -19,6 +20,16 @@ ERROR_MAGNITUDES = [90, 180, 270]
 # Experiment Settings
 N_TRIALS = 100
 
+PORT = 'COM6'
+ERROR_90_TRIGGER = 1 # signifies an error trial
+ERROR_180_TRIGGER = 2 # signifies an error trial
+ERROR_270_TRIGGER = 3 # signifies an error trial
+NON_ERROR_TRIGGER = 4 # signifies a non-error trial
+
+mmbts = serial.Serial()
+mmbts.port = PORT
+mmbts.open()
+
 # --- Setup ---
 win = visual.Window(size=WIN_SIZE, units='pix', color='black')
 
@@ -27,8 +38,6 @@ target = visual.Rect(win, width=TARGET_SIZE, height=TARGET_SIZE, fillColor='red'
 
 # Simple Instruction Text
 instr = visual.TextStim(win, text="", color='white', height=30, pos=(0, 350))
-
-data_log = []
 
 # --- Helper Functions ---
 def get_movement_vector(keys, step):
@@ -63,12 +72,6 @@ for trial_i in range(N_TRIALS):
     
     # Log Start
     trial_start_time = time.time()
-    data_log.append({
-        'event': 'TRIAL_START',
-        'trial_index': trial_i,
-        'timestamp': trial_start_time,
-        'target_pos': target.pos.tolist()
-    })
 
     trial_complete = False
     
@@ -103,14 +106,16 @@ for trial_i in range(N_TRIALS):
                 if np.random.random() > 0.5: rotation = -rotation
                 move_vec = rotate_vector(move_vec, rotation)
                 
-                # Log Error
-                data_log.append({
-                    'event': 'ERROR_OCCURRED',
-                    'trial_index': trial_i,
-                    'timestamp': time.time(),
-                    'rotation_deg': rotation,
-                    'intended_key': keys[0]
-                })
+                ERROR_TRIGGER = 0
+                if rotation == 90:
+                    ERROR_TRIGGER = ERROR_90_TRIGGER
+                elif rotation == 180:
+                    ERROR_TRIGGER = ERROR_180_TRIGGER
+                else:
+                    ERROR_TRIGGER = ERROR_270_TRIGGER
+                win.callOnFlip(mmbts.write, bytes([ERROR_TRIGGER]))
+            else:
+                win.callOnFlip(mmbts.write, bytes([NON_ERROR_TRIGGER]))
 
             end_pos = start_pos + move_vec
             
@@ -150,13 +155,5 @@ for trial_i in range(N_TRIALS):
                     feedback.draw()
                     win.flip()
 
-    # Log End
-    data_log.append({
-        'event': 'TRIAL_END',
-        'trial_index': trial_i,
-        'timestamp': time.time()
-    })
-
 # --- End ---
 win.close()
-print(f"Recorded {len(data_log)} events.")
