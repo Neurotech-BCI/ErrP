@@ -2,6 +2,7 @@ from psychopy import visual, core, event, gui
 import numpy as np
 import time
 import serial
+import math
 
 # --- Configuration ---
 WIN_SIZE = [1200, 800]
@@ -18,7 +19,7 @@ ERROR_PROB = 0.15           # 30% chance
 ERROR_MAGNITUDES = [90, 180, 270] 
 
 # Experiment Settings
-N_TRIALS = 100
+N_TRIALS = 50
 
 PORT = 'COM6'
 ERROR_90_TRIGGER = 1 # signifies an error trial
@@ -107,9 +108,9 @@ for trial_i in range(N_TRIALS):
                 move_vec = rotate_vector(move_vec, rotation)
                 
                 ERROR_TRIGGER = 0
-                if rotation == 90:
+                if math.abs(rotation) == 90:
                     ERROR_TRIGGER = ERROR_90_TRIGGER
-                elif rotation == 180:
+                elif math.abs(rotation) == 180:
                     ERROR_TRIGGER = ERROR_180_TRIGGER
                 else:
                     ERROR_TRIGGER = ERROR_270_TRIGGER
