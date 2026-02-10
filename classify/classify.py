@@ -7,7 +7,6 @@ from torch.utils.data import DataLoader, TensorDataset
 from bayesian_torch.models.dnn_to_bnn import get_kl_loss
 import torch.nn.functional as F
 from sklearn.preprocessing import MinMaxScaler
-from dlordinal.losses import TriangularLoss,CDWCELoss
 from imblearn.over_sampling import SMOTE
 
 
@@ -78,8 +77,6 @@ def classify_torch(X, y, model_class, args=(), kwargs = {}, bayesian = False, cv
     f1_scores = []
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
-    #criterion = TriangularLoss(base_loss=nn.CrossEntropyLoss(), num_classes=kwargs['num_classes']).to(device)
-    criterion = CDWCELoss(num_classes=kwargs['num_classes']).to(device)
     data_tensor = torch.tensor(np.expand_dims(X,axis=1),dtype=torch.float32)
     labels_tensor = torch.tensor(y,dtype=torch.long)
     for train, test in cv_splitter.split(data_tensor,labels_tensor,groups=groups):
