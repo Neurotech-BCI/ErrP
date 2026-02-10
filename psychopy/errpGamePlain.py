@@ -108,9 +108,9 @@ for trial_i in range(N_TRIALS):
                 move_vec = rotate_vector(move_vec, rotation)
                 
                 ERROR_TRIGGER = 0
-                if math.abs(rotation) == 90:
+                if (rotation + 360) % 360 == 90:
                     ERROR_TRIGGER = ERROR_90_TRIGGER
-                elif math.abs(rotation) == 180:
+                elif (rotation + 360) % 360 == 180:
                     ERROR_TRIGGER = ERROR_180_TRIGGER
                 else:
                     ERROR_TRIGGER = ERROR_270_TRIGGER
