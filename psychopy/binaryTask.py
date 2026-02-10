@@ -51,7 +51,12 @@ for run in range(RUNS_PER_LOOP):
         # 1. SETUP LOGIC
         targets_list = ['left', 'right', 'rest']
         target_side = random.choice(targets_list)
-        side_trigger = LEFT_TRIGGER if target_side == 'left' else RIGHT_TRIGGER
+        if target_side == 'left':
+          side_trigger = LEFT_TRIGGER
+        elif target_side == 'right':
+          side_trigger = RIGHT_TRIGGER
+        else:
+          side_trigger = REST_TRIGGER
 
         # 2. PART A: IMAGERY INSTRUCTION (Text Only)
         instr_text.text = "Target about to flash!\nWhen it does, imagine moving the cursor to it."
