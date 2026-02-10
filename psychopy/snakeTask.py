@@ -24,8 +24,8 @@ mmbts.open()
 
 # Window setup
 win = visual.Window(
-    size=[1024, 768],
-    fullscr=False,
+    # size=[1024, 768],
+    fullscr=True,
     screen=0,
     color=SCREEN_BG_COLOR,
     units='height'
