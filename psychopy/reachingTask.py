@@ -19,9 +19,9 @@ FLASH_ONLY_DURATION = 0.5
 MOVE_DURATION = 2.5                     
 ITI_DURATION = 1.5                      
 
-TRIG_LEFT_ARM = 10
-TRIG_RIGHT_ARM = 20
-TRIG_REST = 30
+TRIG_LEFT = 1
+TRIG_RIGHT = 2
+TRIG_REST = 3
 
 # This block allows the script to run WITHOUT an EEG box
 try:
@@ -44,31 +44,34 @@ for run in range(RUNS_PER_LOOP):
     for trial in range(NUM_TRIALS):
         if 'escape' in event.getKeys(): core.quit()
 
-        limb = random.choice(['LEFT', 'RIGHT', 'REST'])
-        direction = random.choice(['left', 'right']) 
+        direction = random.choice(['LEFT', 'RIGHT', 'REST'])
         
-        if limb == 'LEFT': side_trigger = TRIG_LEFT_ARM
-        elif limb == 'RIGHT': side_trigger = TRIG_RIGHT_ARM
+        if direction == 'LEFT': side_trigger = TRIG_LEFT
+        elif direction == 'RIGHT': side_trigger = TRIG_RIGHT
         else: side_trigger = TRIG_REST
-
-        target_obj = target_left if direction == 'left' else target_right
-        target_pos = -0.6 if direction == 'left' else 0.6
+        
+        target_obj = None
+        if direction == 'LEFT': target_obj = target_left
+        elif direction == 'RIGHT': target_obj = target_right
+        
+        if direction == 'LEFT': target_pos = -0.6
+        elif direction == 'RIGHT': target_pos = 0.6
 
         cursor.pos = (0, 0)
         target_left.fillColor = target_right.fillColor = None
         
-        if limb == 'REST':
+        if direction == 'REST':
             instr_text.text = "Resting: Keep your arms still."
         else:
-            instr_text.text = f"Prepare to REACH with your {limb} ARM toward the {direction.upper()} target."
+            instr_text.text = f"Prepare to REACH with your dominant arm toward the {direction.upper()} target."
         
         target_left.draw(); target_right.draw(); cursor.draw(); instr_text.draw()
         win.flip()
         core.wait(PREP_DURATION)
 
-        if limb != 'REST':
+        if direction != 'REST':
             target_obj.fillColor = 'green'
-            instr_text.text = f"IMAGINE REACHING: {limb} ARM"
+            instr_text.text = f"IMAGINE REACHING"
         
         # This only executes if mmbts was successfully connected
         if mmbts:
@@ -80,7 +83,7 @@ for run in range(RUNS_PER_LOOP):
 
         move_timer = core.Clock()
         while move_timer.getTime() < MOVE_DURATION:
-            if limb != 'REST':
+            if direction != 'REST':
                 progress = move_timer.getTime() / MOVE_DURATION
                 cursor.pos = (target_pos * progress, 0)
             
