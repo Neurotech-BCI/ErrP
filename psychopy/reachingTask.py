@@ -10,7 +10,8 @@ else:
     # MacBook port: check with 'ls /dev/cu.usb*'
     PORT = "/dev/cu.usbserial-10" 
 
-NUM_TRIALS = 50
+NUM_MOVEMENT_TRIALS = 2
+NUM_MI_TRIALS = 5
 RUNS_PER_LOOP = 3
 BREAK_DURATION = 60
 
@@ -19,9 +20,11 @@ FLASH_ONLY_DURATION = 0.5
 MOVE_DURATION = 2.5                     
 ITI_DURATION = 1.5                      
 
-TRIG_LEFT = 1
-TRIG_RIGHT = 2
-TRIG_REST = 3
+TRIG_MOVEMENT_LEFT = 1 # physical movement to the left
+TRIG_MOVEMENT_RIGHT = 2 # physical movement to the right
+TRIG_REST = 3 # rest
+TRIG_MI_LEFT = 4 # imagined movement to the left
+TRIG_MI_RIGHT = 5 # imagined movement to the right
 
 # This block allows the script to run WITHOUT an EEG box
 try:
@@ -37,16 +40,35 @@ target_left = visual.Circle(win, radius=0.15, lineColor='black', lineWidth=3, po
 target_right = visual.Circle(win, radius=0.15, lineColor='black', lineWidth=3, pos=(0.6, 0))
 
 instr_text = visual.TextStim(win, text="", pos=(0, 0.6), color="black", height=0.08, wrapWidth=1.8)
+title_text = visual.TextStim(win, text="", pos=(0, 0), color="black", height=0.18, wrapWidth=1.8)
 break_text = visual.TextStim(win, text="", color="black", height=0.1)
 
 for run in range(RUNS_PER_LOOP):
-    for trial in range(NUM_TRIALS):
+    for trial in range(NUM_MOVEMENT_TRIALS + NUM_MI_TRIALS):
+        if trial == 0:
+            title_text.text = "For these few trials, move your arm in the direction of the indicated target."
+            title_text.draw()
+            win.flip()
+            core.wait(5)
+        if trial == NUM_MOVEMENT_TRIALS:
+            title_text.text = "From now on, only imagine moving your arm, rather than actually moving it."
+            title_text.draw()
+            win.flip()
+            core.wait(5)
         if 'escape' in event.getKeys(): core.quit()
+
+        if trial < NUM_MOVEMENT_TRIALS:
+            trialType = "movement"
+        else:
+            trialType = "imagery"
 
         direction = random.choice(['LEFT', 'RIGHT', 'REST'])
         
-        if direction == 'LEFT': side_trigger = TRIG_LEFT
-        elif direction == 'RIGHT': side_trigger = TRIG_RIGHT
+        # assign triggers
+        if direction == 'LEFT' and trialType == "movement": side_trigger = TRIG_MOVEMENT_LEFT
+        elif direction == 'RIGHT' and trialType == "movement": side_trigger = TRIG_MOVEMENT_RIGHT
+        elif direction == 'LEFT' and trialType == "imagery": side_trigger = TRIG_MI_LEFT
+        elif direction == 'RIGHT' and trialType == "imagery": side_trigger = TRIG_MI_RIGHT
         else: side_trigger = TRIG_REST
         
         target_obj = None
@@ -61,7 +83,7 @@ for run in range(RUNS_PER_LOOP):
         if direction == 'REST':
             instr_text.text = "Resting: Keep your arms still."
         else:
-            instr_text.text = f"Prepare to REACH with your dominant arm toward the {direction.upper()} target."
+            instr_text.text = f"Prepare to reach {direction}"
         
         target_left.draw(); target_right.draw(); instr_text.draw()
         win.flip()
@@ -69,7 +91,10 @@ for run in range(RUNS_PER_LOOP):
 
         if direction != 'REST':
             target_obj.fillColor = 'green'
-            instr_text.text = f"IMAGINE REACHING"
+            if trial >= NUM_MOVEMENT_TRIALS:
+                instr_text.text = "IMAGINE REACHING"
+            else:
+                instr_text.text = "PERFORM MOVEMENT"
         
         # This only executes if mmbts was successfully connected
         if mmbts:
