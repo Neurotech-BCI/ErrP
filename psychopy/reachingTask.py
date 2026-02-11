@@ -33,7 +33,6 @@ except:
 
 win = visual.Window(color="gray", units='norm', fullscr=True)
 
-cursor = visual.Circle(win, radius=0.05, fillColor='black', pos=(0, 0))
 target_left = visual.Circle(win, radius=0.15, lineColor='black', lineWidth=3, pos=(-0.6, 0))
 target_right = visual.Circle(win, radius=0.15, lineColor='black', lineWidth=3, pos=(0.6, 0))
 
@@ -57,7 +56,6 @@ for run in range(RUNS_PER_LOOP):
         if direction == 'LEFT': target_pos = -0.6
         elif direction == 'RIGHT': target_pos = 0.6
 
-        cursor.pos = (0, 0)
         target_left.fillColor = target_right.fillColor = None
         
         if direction == 'REST':
@@ -65,7 +63,7 @@ for run in range(RUNS_PER_LOOP):
         else:
             instr_text.text = f"Prepare to REACH with your dominant arm toward the {direction.upper()} target."
         
-        target_left.draw(); target_right.draw(); cursor.draw(); instr_text.draw()
+        target_left.draw(); target_right.draw(); instr_text.draw()
         win.flip()
         core.wait(PREP_DURATION)
 
@@ -77,19 +75,12 @@ for run in range(RUNS_PER_LOOP):
         if mmbts:
             win.callOnFlip(mmbts.write, bytes([side_trigger]))
         
-        target_left.draw(); target_right.draw(); cursor.draw(); instr_text.draw()
+        target_left.draw(); target_right.draw(); instr_text.draw()
         win.flip()
         core.wait(FLASH_ONLY_DURATION)
 
         move_timer = core.Clock()
-        while move_timer.getTime() < MOVE_DURATION:
-            if direction != 'REST':
-                progress = move_timer.getTime() / MOVE_DURATION
-                cursor.pos = (target_pos * progress, 0)
-            
-            target_left.draw(); target_right.draw(); cursor.draw(); instr_text.draw()
-            win.flip()
-
+        core.wait(MOVE_DURATION)
         win.flip()
         core.wait(ITI_DURATION)
 
