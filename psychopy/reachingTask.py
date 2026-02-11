@@ -10,8 +10,8 @@ else:
     # MacBook port: check with 'ls /dev/cu.usb*'
     PORT = "/dev/cu.usbserial-10" 
 
-NUM_MOVEMENT_TRIALS = 2
-NUM_MI_TRIALS = 5
+NUM_MOVEMENT_TRIALS = 10
+NUM_MI_TRIALS = 50
 RUNS_PER_LOOP = 3
 BREAK_DURATION = 60
 
