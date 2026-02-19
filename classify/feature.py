@@ -23,7 +23,7 @@ import pywt
 ### Wrapper for extracting temporal features from raw EEG samples in shape (num_channels,time_steps)
 ### and returning outputs in shape (num_channels, num_features)
 class FeatureWrapper:
-    def __init__(self, left_ch_idx=None, right_ch_idx=None, lr_pairs=None):
+    def __init__(self, left_ch_idx=None, right_ch_idx=None, lr_pairs=None, pre_s=0.0):
         """
         Contralateral / lateralization support:
 
@@ -34,10 +34,16 @@ class FeatureWrapper:
         lr_pairs:
             Optional list of (l_idx, r_idx) symmetric channel pairs.
             Used for pairwise lateralization features.
+
+        pre_s:
+            Pre-stimulus duration in seconds (for epoch-aware features like
+            ErrP temporal windows). E.g. if epochs are -0.2 to 0.8s, set
+            pre_s=0.2 so that t=0 (stimulus onset) maps to the correct sample.
         """
         self.left_ch_idx = None if left_ch_idx is None else np.asarray(left_ch_idx, dtype=int)
         self.right_ch_idx = None if right_ch_idx is None else np.asarray(right_ch_idx, dtype=int)
         self.lr_pairs = lr_pairs  # list[(l_idx, r_idx)] or None
+        self.pre_s = pre_s
 
         self.func_dict = {
             # Existing features
@@ -100,6 +106,13 @@ class FeatureWrapper:
             "rel_mu_lateralization_groups": self.compute_rel_mu_lateralization_groups,
             "rel_beta_lateralization_groups": self.compute_rel_beta_lateralization_groups,
             "rel_alpha_lateralization_groups": self.compute_rel_alpha_lateralization_groups,
+
+            # --- ErrP temporal window features (require pre_s to be set) ---
+            "errp_ne_mean": self.compute_errp_ne_mean,
+            "errp_pe_mean": self.compute_errp_pe_mean,
+            "errp_ne_min": self.compute_errp_ne_min,
+            "errp_pe_max": self.compute_errp_pe_max,
+            "errp_peak_to_peak": self.compute_errp_peak_to_peak,
         }
 
     ### Helpers ###
@@ -481,6 +494,50 @@ class FeatureWrapper:
     def compute_rel_alpha_lateralization_groups(self, data, fs):
         rel_alpha = self.compute_rel_alpha_power(data, fs)
         return self._group_lateralization(rel_alpha, data.shape[0])
+
+    # -----------------------
+    # ErrP temporal window features
+    # -----------------------
+    def _window_samples(self, fs, t_start, t_end):
+        """Convert post-stimulus times (seconds) to sample indices in the epoch."""
+        onset = int(round(self.pre_s * fs))
+        return max(onset + int(round(t_start * fs)), 0), onset + int(round(t_end * fs))
+
+    def compute_errp_ne_mean(self, data, fs):
+        """Mean amplitude in the Ne/ERN window (50-150 ms post-stimulus)."""
+        s, e = self._window_samples(fs, 0.05, 0.15)
+        e = min(e, data.shape[1])
+        if s >= e:
+            return np.zeros(data.shape[0])
+        return np.mean(data[:, s:e], axis=1)
+
+    def compute_errp_pe_mean(self, data, fs):
+        """Mean amplitude in the Pe window (200-400 ms post-stimulus)."""
+        s, e = self._window_samples(fs, 0.20, 0.40)
+        e = min(e, data.shape[1])
+        if s >= e:
+            return np.zeros(data.shape[0])
+        return np.mean(data[:, s:e], axis=1)
+
+    def compute_errp_ne_min(self, data, fs):
+        """Most negative deflection in the Ne/ERN window (50-150 ms)."""
+        s, e = self._window_samples(fs, 0.05, 0.15)
+        e = min(e, data.shape[1])
+        if s >= e:
+            return np.zeros(data.shape[0])
+        return np.min(data[:, s:e], axis=1)
+
+    def compute_errp_pe_max(self, data, fs):
+        """Most positive deflection in the Pe window (200-400 ms)."""
+        s, e = self._window_samples(fs, 0.20, 0.40)
+        e = min(e, data.shape[1])
+        if s >= e:
+            return np.zeros(data.shape[0])
+        return np.max(data[:, s:e], axis=1)
+
+    def compute_errp_peak_to_peak(self, data, fs):
+        """Pe max minus Ne min — the characteristic ErrP amplitude."""
+        return self.compute_errp_pe_max(data, fs) - self.compute_errp_ne_min(data, fs)
 
     # -----------------------
     # Main API
