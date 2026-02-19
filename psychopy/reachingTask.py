@@ -15,7 +15,7 @@ NUM_MI_TRIALS = 50
 RUNS_PER_LOOP = 3
 BREAK_DURATION = 60
 
-PREP_DURATION = random.uniform(1.5, 2.5) 
+PREP_DURATION = 3.0
 FLASH_ONLY_DURATION = 0.5               
 MOVE_DURATION = 2.5                     
 ITI_DURATION = 1.5                      
