@@ -85,7 +85,7 @@ def main():
         tmax=eeg.tmax,
         baseline=eeg.baseline,
         reject=None,
-    ).connect(acquisition_delay=0.02)
+    ).connect(acquisition_delay=0.001)
 
     classifier = _make_classifier(model_cfg.n_csp_components)
     is_trained = False
