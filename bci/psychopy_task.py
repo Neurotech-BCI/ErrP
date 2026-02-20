@@ -152,7 +152,7 @@ def run_task():
 
     # How long to wait after MI ends for the worker to publish the trial prediction.
     # Should be > typical compute + publish latency.
-    PRED_WAIT_TIMEOUT_S = 1.25
+    PRED_WAIT_TIMEOUT_S = 5.0
 
     # UI geometry
     WIN_SIZE = (1200, 700)
@@ -284,19 +284,12 @@ def run_task():
         status_text.text = "Go!"
 
         # Send trigger exactly at MI onset
-        trig.pulse(y_true)
-
+        trig.pulse(y_true + 1)
+        draw_scene()
+        win.flip()
         mi_clock = core.Clock()
         while mi_clock.getTime() < MI_DURATION:
             # We can display *live* updates if any arrive (but final decision is post-wait)
-            pred_rx.poll_latest(0)
-            if pred_rx.last_payload is not None:
-                y_pred_live = pred_rx.last_payload.get("y_pred", None)
-                conf = pred_rx.last_payload.get("conf", 0.0)
-                trained = pred_rx.last_payload.get("trained", False)
-                status_text.text = f"Model: {('LEFT' if y_pred_live==0 else 'RIGHT')} | conf={conf:.2f} | trained={trained}"
-            draw_scene()
-            win.flip()
             if "escape" in event.getKeys():
                 raise KeyboardInterrupt
 

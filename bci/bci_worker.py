@@ -59,16 +59,8 @@ def main():
     )
     stream.connect(acquisition_delay=0.02, processing_flags="all")
     print(f"Original channel names: {stream.info['ch_names']}")
-    stream.set_eeg_reference(ref_channels=['EEG LE-Pz'])
-    rename_dict = {}
-    for ch_name in stream.info["ch_names"]:
-        if '-Pz' in ch_name:
-            rename_dict[ch_name] = ch_name.replace('-Pz', '')
-        if ch_name == "Pz":
-            rename_dict[ch_name] = "EEG Pz"
-    stream.rename_channels(rename_dict)
-    print(f"Updated channel names: {stream.info['ch_names']}")
-
+    stream.pick(list(eeg.picks) + [lsl.event_channels])
+    stream.set_channel_types({'TRG': 'stim'})
     # Ensure channel types are correct if needed; often stim channel is already set.
     # Apply stream-level filters (MNE-LSL supports stream filters) :contentReference[oaicite:9]{index=9}
     if eeg.notch is not None:
@@ -81,16 +73,13 @@ def main():
     # Bandpass for MI (mu/beta)
     stream.filter(eeg.l_freq, eeg.h_freq, picks="eeg")
 
-    # Keep only desired channels + stim
-    # (If your Trigger channel isn’t type='stim', you may need to set types upstream in your LSL outlet.)
-    stream.pick(list(eeg.picks) + [lsl.event_channels])
 
     # --- Epoch extraction around event triggers ---
     # EpochsStream monitors stim channel(s) and extracts epochs on events :contentReference[oaicite:10]{index=10}
     epochs = EpochsStream(
         stream,
         bufsize=30,  # seconds worth of epochs buffer
-        event_id=dict(left=0, right=1),
+        event_id={"left":1, "right":2},
         event_channels=lsl.event_channels,
         tmin=eeg.tmin,
         tmax=eeg.tmax,
@@ -118,17 +107,17 @@ def main():
             if n_new == 0:
                 time.sleep(0.005)
                 continue
-
+                
+            print(f"Got new trigger, n_new={n_new}")
             # Fetch only the new epochs
             X_new = epochs.get_data(n_epochs=n_new)  # shape: (n_new, n_ch, n_times)
+            print(f"New data has shape: {X_new.shape}")
             # epochs.events contains MNE-style event array; last column is event code
-            ev = epochs.events[-n_new:]
-            y_new = ev[:, 2].astype(int)
-
+            y_new = epochs.events[-n_new:]
             # Store
             for i in range(n_new):
                 X_store.append(X_new[i])
-                y_store.append(int(y_new[i]))
+                y_store.append(int(y_new[i])-1)
 
             # Sliding window for nonstationarity / user learning
             if model_cfg.use_sliding_window and len(y_store) > model_cfg.window_size_epochs:

@@ -8,12 +8,11 @@ class LSLConfig:
     source_id: str | None = None # set if needed; otherwise None
 
     # Trigger / stim channel as it appears in the LSL stream info
-    event_channels: str = "Trigger"   # Wearable Sensing DSI devices often expose Trigger/TRG :contentReference[oaicite:4]{index=4}
+    event_channels: str = "TRG"   # Wearable Sensing DSI devices often expose Trigger/TRG :contentReference[oaicite:4]{index=4}
 
 @dataclass(frozen=True)
 class EEGConfig:
-    # Channels you want to use (match your renaming convention)
-    picks: tuple[str, ...] = ("EEG F4", "EEG C4", "EEG P4", "EEG P3", "EEG C3", "EEG F3", "EEG Pz")
+    picks: tuple[str, ...] = ('Pz', 'F4', 'C4', 'P4', 'P3', 'C3', 'F3')
 
     # Real-time filtering (stream-level)
     l_freq: float = 8.0     # MI mu/beta emphasis
@@ -30,7 +29,7 @@ class EEGConfig:
 @dataclass(frozen=True)
 class ModelConfig:
     # Wait for this many epochs before first training
-    min_epochs_to_train: int = 12
+    min_epochs_to_train: int = 8
 
     # Retrain every N new epochs
     retrain_every: int = 4
@@ -52,4 +51,4 @@ class ZMQConfig:
 class SerialConfig:
     port: str = "COM6"  
     baudrate: int = 115200 
-    pulse_width_s: float = 0.01  # send code then reset-to-0 after this
+    pulse_width_s: float = 0.1  # send code then reset-to-0 after this
