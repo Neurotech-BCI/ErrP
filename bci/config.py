@@ -21,7 +21,7 @@ class EEGConfig:
 
     # Epoching window (motor imagery)
     tmin: float = 0.0
-    tmax: float = 2.5       # MI window length (seconds)
+    tmax: float = 2.0       # MI window length (seconds)
 
     # Baseline correction (optional; keep None for pure MI windows)
     baseline: tuple[float | None, float | None] | None = None
@@ -51,4 +51,4 @@ class ZMQConfig:
 class SerialConfig:
     port: str = "COM6"  
     baudrate: int = 115200 
-    pulse_width_s: float = 0.1  # send code then reset-to-0 after this
+    pulse_width_s: float = 0.01  # send code then reset-to-0 after this

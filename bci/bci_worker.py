@@ -13,7 +13,7 @@ from sklearn.linear_model import LogisticRegression
 from mne_lsl.stream import StreamLSL, EpochsStream  # per MNE-LSL decoding example :contentReference[oaicite:7]{index=7}
 
 from config import LSLConfig, EEGConfig, ModelConfig, ZMQConfig
-
+import matplotlib.pyplot as plt
 
 def _make_classifier(n_csp_components: int) -> Pipeline:
     # CSP expects (n_epochs, n_channels, n_times)
@@ -64,11 +64,8 @@ def main():
     # Ensure channel types are correct if needed; often stim channel is already set.
     # Apply stream-level filters (MNE-LSL supports stream filters) :contentReference[oaicite:9]{index=9}
     if eeg.notch is not None:
-        try:
-            stream.notch_filter(eeg.notch)
-        except Exception:
-            # Some versions may require specifying picks; keep robust.
-            stream.notch_filter(eeg.notch, picks="eeg")
+        stream.notch_filter(eeg.notch, picks="eeg")
+
 
     # Bandpass for MI (mu/beta)
     stream.filter(eeg.l_freq, eeg.h_freq, picks="eeg")
@@ -103,17 +100,18 @@ def main():
     try:
         while True:
             # n_new_epochs counts epochs not yet fetched/consumed
+
             n_new = epochs.n_new_epochs
             if n_new == 0:
                 time.sleep(0.005)
                 continue
                 
-            print(f"Got new trigger, n_new={n_new}")
             # Fetch only the new epochs
-            X_new = epochs.get_data(n_epochs=n_new)  # shape: (n_new, n_ch, n_times)
-            print(f"New data has shape: {X_new.shape}")
+            X_new = epochs.get_data(n_epochs=n_new, picks="eeg")  # shape: (n_new, n_ch, n_times)
+            #print(f"New data has shape: {X_new.shape}")
             # epochs.events contains MNE-style event array; last column is event code
             y_new = epochs.events[-n_new:]
+            #print(f"Trigger found of value: {y_new}")
             # Store
             for i in range(n_new):
                 X_store.append(X_new[i])
@@ -187,7 +185,6 @@ def main():
             ctx.term()
         except Exception:
             pass
-
 
 if __name__ == "__main__":
     main()

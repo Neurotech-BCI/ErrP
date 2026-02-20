@@ -7,7 +7,7 @@ import serial
 import zmq
 from psychopy import visual, core, event
 
-from config import ZMQConfig, SerialConfig, ModelConfig
+from config import ZMQConfig, SerialConfig, ModelConfig, EEGConfig
 
 
 # ---------------- Serial trigger helpers ----------------
@@ -141,11 +141,11 @@ def run_task():
     zmq_cfg = ZMQConfig()
     ser_cfg = SerialConfig()
     model_cfg = ModelConfig()
-
+    eeg_cfg = EEGConfig()
     # Timing
-    PREP_DURATION = 3.0
-    MI_DURATION = 2.5
-    ITI = 1.0
+    PREP_DURATION = 2.0
+    MI_DURATION = eeg_cfg.tmax
+    ITI = 2.0
 
     # Use enough trials for your session (can be >= window size, etc.)
     N_TRIALS = 80
