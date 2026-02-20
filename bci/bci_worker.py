@@ -57,7 +57,7 @@ def main():
         stype=lsl.stype,
         source_id=lsl.source_id,
     )
-    stream.connect(acquisition_delay=0.02, processing_flags="all")
+    stream.connect(acquisition_delay=0.001, processing_flags="all")
     print(f"Original channel names: {stream.info['ch_names']}")
     stream.pick(list(eeg.picks) + [lsl.event_channels])
     stream.set_channel_types({'TRG': 'stim'})
