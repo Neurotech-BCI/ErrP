@@ -11,7 +11,7 @@ from mne_lsl.lsl import resolve_streams
 
 
 source_id = "debug-source-id-001" # can also use name if not using simulated data
-filepath = r"/Users/chris/Desktop/coding projects/LSL_testing/eeg_data.csv"
+filepath = r"/Users/chris/Desktop/coding projects/LSL_testing/eeg_data.csv" # where to write your csv file
 
 
 # Find all streams
