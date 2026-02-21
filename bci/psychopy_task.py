@@ -145,7 +145,7 @@ def run_task():
     # Timing
     PREP_DURATION = 2.0
     MI_DURATION = eeg_cfg.tmax
-    ITI = 2.0
+    ITI = 3.0
 
     # Use enough trials for your session (can be >= window size, etc.)
     N_TRIALS = 80

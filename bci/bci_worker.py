@@ -15,7 +15,35 @@ from mne_lsl.stream import StreamLSL, EpochsStream  # per MNE-LSL decoding examp
 from config import LSLConfig, EEGConfig, ModelConfig, ZMQConfig
 import matplotlib.pyplot as plt
 
-def _make_classifier(n_csp_components: int) -> Pipeline:
+
+from pyriemann.estimation import Covariances
+from pyriemann.tangentspace import TangentSpace
+
+
+def _make_classifier_riemann() -> Pipeline:
+    """
+    Riemannian pipeline:
+      epochs -> covariance matrices -> tangent space features -> LR
+
+    Input X: (n_epochs, n_channels, n_times)
+    """
+    cov = Covariances(estimator="oas")  # or "lwf" (Ledoit-Wolf), both are good shrinkage estimators
+    ts = TangentSpace(metric="riemann") # tangent vectors in Euclidean space
+
+    clf = LogisticRegression(
+        solver="liblinear",
+        max_iter=1000,
+        class_weight="balanced",
+        random_state=42,
+    )
+
+    return Pipeline([
+        ("cov", cov),
+        ("ts", ts),
+        ("scaler", StandardScaler(with_mean=True, with_std=True)),
+        ("clf", clf),
+    ])
+def _make_classifier_csp(n_csp_components: int) -> Pipeline:
     # CSP expects (n_epochs, n_channels, n_times)
     # and produces (n_epochs, n_components) with log-variance features.
     csp = CSP(n_components=n_csp_components, reg="ledoit_wolf", log=True, norm_trace=False)
@@ -84,7 +112,10 @@ def main():
         reject=None,
     ).connect(acquisition_delay=0.001)
 
-    classifier = _make_classifier(model_cfg.n_csp_components)
+    if model_cfg.use_riemann:
+        classifier = _make_classifier_riemann()
+    else:
+        classifier = _make_classifier_csp(model_cfg.n_csp_components)
     is_trained = False
 
     X_store: list[np.ndarray] = []

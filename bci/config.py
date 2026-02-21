@@ -17,11 +17,11 @@ class EEGConfig:
     # Real-time filtering (stream-level)
     l_freq: float = 8.0     # MI mu/beta emphasis
     h_freq: float = 30.0
-    notch: float | None = 60.0  # set None if not desired
+    notch: float | None = None  # set None if not desired
 
     # Epoching window (motor imagery)
-    tmin: float = 0.0
-    tmax: float = 2.0       # MI window length (seconds)
+    tmin: float = 0.5
+    tmax: float = 2.5       # MI window length (seconds)
 
     # Baseline correction (optional; keep None for pure MI windows)
     baseline: tuple[float | None, float | None] | None = None
@@ -29,11 +29,12 @@ class EEGConfig:
 @dataclass(frozen=True)
 class ModelConfig:
     # Wait for this many epochs before first training
-    min_epochs_to_train: int = 8
+    min_epochs_to_train: int = 12
 
     # Retrain every N new epochs
     retrain_every: int = 4
 
+    use_riemann: bool = True  # if False, use CSP+LR; if True, use Riemannian geometry approach
     # CSP configuration
     n_csp_components: int = 6
 
