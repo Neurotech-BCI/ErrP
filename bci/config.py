@@ -21,11 +21,20 @@ class EEGConfig:
     notch: float | None = None  # set None if not desired
 
     # Epoching window (motor imagery)
-    tmin: float = 0.0
-    tmax: float = 2.0      # MI window length (seconds)
+    tmin: float = 0.5
+    tmax: float = 2.5      # MI window length (seconds)
 
     # Baseline correction (optional; keep None for pure MI windows)
     baseline: tuple[float | None, float | None] | None = None
+
+    # Artifact rejection: max peak-to-peak amplitude in Volts; None to disable
+    reject_peak_to_peak: float | None = 150e-6
+
+@dataclass(frozen=True)
+class CalibrationConfig:
+    mi_duration_s: float = 10.0      # sustained MI block duration
+    phases_per_class: int = 3        # accepted blocks needed per class
+    prep_duration_s: float = 2.0     # "Prepare: LEFT/RIGHT" cue duration
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -47,10 +56,16 @@ class ModelConfig:
 class ZMQConfig:
     # Worker publishes predictions; PsychoPy subscribes.
     pub_addr: str = "tcp://127.0.0.1:5556"
-    topic: str = "PRED"  # ZMQ PUB/SUB topic prefix
+    ctrl_addr: str = "tcp://127.0.0.1:5557"  # task PUSH -> worker PULL
+    topic: str = "PRED"       # online prediction topic
+    cal_topic: str = "CAL"    # calibration status topic
 
 @dataclass(frozen=True)
 class SerialConfig:
-    port: str = "COM6"  
-    baudrate: int = 115200 
+    port: str = "COM6"
+    baudrate: int = 115200
     pulse_width_s: float = 0.01  # send code then reset-to-0 after this
+
+@dataclass(frozen=True)
+class SessionConfig:
+    name: str = "session_1"  # base filename for saved data
