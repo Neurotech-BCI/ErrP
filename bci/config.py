@@ -13,6 +13,7 @@ class LSLConfig:
 @dataclass(frozen=True)
 class EEGConfig:
     picks: tuple[str, ...] = ('Pz', 'F4', 'C4', 'P4', 'P3', 'C3', 'F3')
+    #picks: tuple[str, ...] = ('C4', 'C3')
 
     # Real-time filtering (stream-level)
     l_freq: float = 8.0     # MI mu/beta emphasis
@@ -20,8 +21,8 @@ class EEGConfig:
     notch: float | None = None  # set None if not desired
 
     # Epoching window (motor imagery)
-    tmin: float = 0.5
-    tmax: float = 2.5       # MI window length (seconds)
+    tmin: float = 0.0
+    tmax: float = 2.0      # MI window length (seconds)
 
     # Baseline correction (optional; keep None for pure MI windows)
     baseline: tuple[float | None, float | None] | None = None
@@ -29,7 +30,7 @@ class EEGConfig:
 @dataclass(frozen=True)
 class ModelConfig:
     # Wait for this many epochs before first training
-    min_epochs_to_train: int = 12
+    min_epochs_to_train: int = 20
 
     # Retrain every N new epochs
     retrain_every: int = 4
