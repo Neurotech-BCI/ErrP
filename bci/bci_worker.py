@@ -343,6 +343,7 @@ def main():
         source_id=lsl.source_id,
     )
     stream.connect(acquisition_delay=0.001, processing_flags="all")
+    print(f"LSL Stream info: {stream.info}")
     print(f"Original channel names: {stream.info['ch_names']}")
 
     # Pick EEG + trigger channel. Keep order stable: EEG picks then TRG.
