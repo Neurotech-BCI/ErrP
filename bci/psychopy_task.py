@@ -53,119 +53,38 @@ class TriggerPort:
 # ---------------- ZMQ helpers ----------------
 
 
-class PredictionReceiver:
-    """ZMQ SUB that handles both PRED and CAL topics."""
-
-    def __init__(self, addr: str, pred_topic: str, cal_topic: str):
-        self.pred_topic = pred_topic
-        self.cal_topic = cal_topic
-        self.ctx = zmq.Context.instance()
-        self.sub = self.ctx.socket(zmq.SUB)
-        self.sub.connect(addr)
-        self.sub.setsockopt_string(zmq.SUBSCRIBE, pred_topic)
-        self.sub.setsockopt_string(zmq.SUBSCRIBE, cal_topic)
-
-        self.poller = zmq.Poller()
-        self.poller.register(self.sub, zmq.POLLIN)
-
-        self.last_payload = None  # latest PRED payload
-        self.last_cal = None  # latest CAL payload
-
-    def close(self):
-        try:
-            self.sub.close(0)
-        except Exception:
-            pass
-
-    def _recv_one(self) -> tuple[str, dict]:
-        msg = self.sub.recv_string()
-        topic, j = msg.split(" ", 1)
-        return topic, json.loads(j)
-
-    def poll_latest(self, timeout_ms: int = 0):
-        """Drain queue, keep latest PRED payload. CAL payloads stashed in last_cal."""
-        latest_pred = None
-        socks = dict(self.poller.poll(timeout_ms))
-        while socks.get(self.sub) == zmq.POLLIN:
-            topic, payload = self._recv_one()
-            if topic == self.pred_topic:
-                latest_pred = payload
-            elif topic == self.cal_topic:
-                self.last_cal = payload
-            socks = dict(self.poller.poll(0))
-        if latest_pred is not None:
-            self.last_payload = latest_pred
-        return latest_pred
-
-    def wait_for_cal_status(self, target_status: str, timeout_s: float) -> dict | None:
-        """Block until a CAL message with matching status arrives."""
-        deadline = time.time() + timeout_s
-        self.last_cal = None
-        while time.time() < deadline:
-            remaining = max(0.0, deadline - time.time())
-            timeout_ms = int(min(100, remaining * 1000))
-            self.poll_latest(timeout_ms=timeout_ms)
-            if self.last_cal is not None and self.last_cal.get("status") == target_status:
-                result = self.last_cal
-                self.last_cal = None
-                return result
-            if "escape" in event.getKeys():
-                raise KeyboardInterrupt
-        return None
-
-    def wait_for_cal_statuses(self, target_statuses: set[str], timeout_s: float) -> dict | None:
-        """Block until a CAL message with a status in target_statuses arrives."""
-        deadline = time.time() + timeout_s
-        self.last_cal = None
-        while time.time() < deadline:
-            remaining = max(0.0, deadline - time.time())
-            timeout_ms = int(min(100, remaining * 1000))
-            self.poll_latest(timeout_ms=timeout_ms)
-            if self.last_cal is not None and self.last_cal.get("status") in target_statuses:
-                result = self.last_cal
-                self.last_cal = None
-                return result
-            if "escape" in event.getKeys():
-                raise KeyboardInterrupt
-        return None
-
-    def wait_for_trial_id(self, trial_id: int, timeout_s: float) -> dict | None:
-        """Block until a PRED payload with matching trial_id arrives."""
-        deadline = time.time() + timeout_s
-
-        if self.last_payload is not None and int(self.last_payload.get("trial_id", -1)) == trial_id:
-            return self.last_payload
-
-        best = None
-        while time.time() < deadline:
-            remaining = max(0.0, deadline - time.time())
-            timeout_ms = int(min(50, remaining * 1000))
-            latest = self.poll_latest(timeout_ms=timeout_ms)
-            if latest is not None:
-                best = latest
-                if int(latest.get("trial_id", -1)) == trial_id:
-                    return latest
-            if "escape" in event.getKeys():
-                raise KeyboardInterrupt
-
-        return best
-
-
-class ControlSender:
-    """ZMQ PUSH socket to send control commands to the worker."""
+class BCILink:
+    """Bidirectional ZMQ PAIR link to the BCI worker."""
 
     def __init__(self, addr: str):
         self.ctx = zmq.Context.instance()
-        self.push = self.ctx.socket(zmq.PUSH)
-        self.push.connect(addr)
+        self.pair = self.ctx.socket(zmq.PAIR)
+        self.pair.connect(addr)
+        self.poller = zmq.Poller()
+        self.poller.register(self.pair, zmq.POLLIN)
 
-    def send(self, action: str, **kwargs):
-        payload = {"action": action, **kwargs}
-        self.push.send_string(json.dumps(payload))
+    def send(self, payload: dict):
+        self.pair.send_string(json.dumps(payload))
+
+    def recv(self, timeout_s: float = 10.0) -> dict | None:
+        """Blocking receive with timeout. Returns None on timeout."""
+        timeout_ms = int(timeout_s * 1000)
+        socks = dict(self.poller.poll(timeout_ms))
+        if self.pair in socks:
+            return json.loads(self.pair.recv_string())
+        return None
+
+    def drain(self):
+        """Non-blocking: discard any queued messages."""
+        while True:
+            socks = dict(self.poller.poll(0))
+            if self.pair not in socks:
+                break
+            self.pair.recv_string()
 
     def close(self):
         try:
-            self.push.close(0)
+            self.pair.close(0)
         except Exception:
             pass
 
@@ -243,8 +162,7 @@ def run_task():
     CURSOR = (0.2, 0.8, 0.9)
 
     # Setup comms
-    pred_rx = PredictionReceiver(zmq_cfg.pub_addr, zmq_cfg.topic, zmq_cfg.cal_topic)
-    ctrl_tx = ControlSender(zmq_cfg.ctrl_addr)
+    link = BCILink(zmq_cfg.pair_addr)
 
     trig = TriggerPort(ser_cfg.port, ser_cfg.baudrate, ser_cfg.pulse_width_s)
     trig.open()
@@ -280,7 +198,7 @@ def run_task():
         while clock.getTime() < duration:
             t = clock.getTime() / duration
             cursor.pos = (start[0] + (end[0] - start[0]) * t, start[1] + (end[1] - start[1]) * t)
-            pred_rx.poll_latest(0)
+            link.drain()
             draw_scene()
             win.flip()
             if "escape" in event.getKeys():
@@ -294,7 +212,7 @@ def run_task():
         while clock.getTime() < duration:
             t = clock.getTime() / duration
             cursor.pos = (start[0] + (end[0] - start[0]) * t, start[1] + (end[1] - start[1]) * t)
-            pred_rx.poll_latest(0)
+            link.drain()
             draw_scene()
             win.flip()
             if "escape" in event.getKeys():
@@ -335,21 +253,30 @@ def run_task():
         if "escape" in keys:
             win.close()
             trig.close()
-            pred_rx.close()
-            ctrl_tx.close()
+            link.close()
             return
 
-    ctrl_tx.send("SESSION_START", t_task=time.time())
+    # Session handshake
+    link.send({"action": "SESSION_START"})
+    ready = link.recv(timeout_s=10.0)
+    if ready is None or ready.get("status") != "ready":
+        cue_text.text = "Worker not responding.\nIs bci_worker.py running?\n\nPress ESC to quit."
+        status_text.text = ""
+        draw_scene()
+        win.flip()
+        while True:
+            if "escape" in event.getKeys():
+                break
+        win.close()
+        trig.close()
+        link.close()
+        return
 
     # ==============================================================
     # PHASE 1: CALIBRATION (normal trials, no feedback)
     # ==============================================================
-    trial_id = 0
     cal_scheduler = BalancedBlockScheduler(block_size=max(2, model_cfg.retrain_every), left_code=LEFT, right_code=RIGHT, seed=None)
     for cal_idx in range(N_CAL_TRIALS):
-        pred_rx.poll_latest(0)
-        pred_rx.last_payload = None
-
         y_true_code = cal_scheduler.next_code()
         set_targets(None)
         cue_text.text = ""
@@ -358,7 +285,7 @@ def run_task():
 
         iti_clock = core.Clock()
         while iti_clock.getTime() < ITI:
-            pred_rx.poll_latest(0)
+            link.drain()
             draw_scene()
             win.flip()
             if "escape" in event.getKeys():
@@ -369,7 +296,7 @@ def run_task():
         status_text.text = "Get ready..."
         prep_clock = core.Clock()
         while prep_clock.getTime() < PREP_DURATION:
-            pred_rx.poll_latest(0)
+            link.drain()
             draw_scene()
             win.flip()
             if "escape" in event.getKeys():
@@ -378,7 +305,6 @@ def run_task():
         set_targets(code_to_side(y_true_code))
         cue_text.text = f"IMAGINE: {code_to_name(y_true_code)}"
         status_text.text = "Calibration (no feedback)"
-        ctrl_tx.send("TRIAL_START", trial_id=int(trial_id), code=int(y_true_code), t_task=time.time())
         trig.pulse(int(y_true_code))
 
         draw_scene()
@@ -394,21 +320,34 @@ def run_task():
         draw_scene()
         win.flip()
         core.wait(0.2)
-        trial_id += 1
 
+    # ==============================================================
+    # TRAINING REQUEST
+    # ==============================================================
     cue_text.text = "Training classifier on calibration data...\nPlease wait."
     status_text.text = ""
     draw_scene()
     win.flip()
 
-    cal_result = pred_rx.wait_for_cal_statuses({"trained", "error"}, timeout_s=CAL_TRAIN_TIMEOUT_S)
+    link.send({"action": "TRAIN", "n_trials": N_CAL_TRIALS})
+
+    # Poll in 100ms chunks for escape-key responsiveness
+    deadline = time.time() + CAL_TRAIN_TIMEOUT_S
+    cal_result = None
+    while time.time() < deadline:
+        remaining = max(0.0, deadline - time.time())
+        cal_result = link.recv(timeout_s=min(0.1, remaining))
+        if cal_result is not None:
+            break
+        if "escape" in event.getKeys():
+            raise KeyboardInterrupt
+
     if cal_result and cal_result.get("status") == "trained":
-        trained_status = cal_result
-        cv_mean = trained_status.get("cv_mean", 0)
-        cv_std = trained_status.get("cv_std", 0)
-        n_epochs = trained_status.get("n_epochs", 0)
-        n_per_class = trained_status.get("n_per_class", {str(LEFT): 0, str(RIGHT): 0})
-        best_C = trained_status.get("best_C", None)
+        cv_mean = cal_result.get("cv_mean", 0)
+        cv_std = cal_result.get("cv_std", 0)
+        n_epochs = cal_result.get("n_epochs", 0)
+        n_per_class = cal_result.get("n_per_class", {str(LEFT): 0, str(RIGHT): 0})
+        best_C = cal_result.get("best_C", None)
         cue_text.text = (
             f"Calibration Complete!\n\n"
             f"Cross-validated accuracy: {cv_mean:.1%} +/- {cv_std:.1%}\n"
@@ -426,8 +365,11 @@ def run_task():
     win.flip()
     wait_for_space()
 
-    # Enable live predictions. Raw capture is already active from SESSION_START.
-    ctrl_tx.send("ONLINE_START", t_task=time.time())
+    # Enable live predictions
+    link.send({"action": "ONLINE_START"})
+    ack = link.recv(timeout_s=5.0)
+    if ack is None or ack.get("status") != "ack":
+        print("[WARN] ONLINE_START not acknowledged by worker.")
 
     # ==============================================================
     # PHASE 2: ONLINE TRIALS
@@ -436,9 +378,6 @@ def run_task():
     correct_count = 0
 
     for live_idx in range(N_LIVE_TRIALS):
-        pred_rx.poll_latest(0)
-        pred_rx.last_payload = None
-
         y_true_code = scheduler.next_code()  # 1=LEFT, 2=RIGHT
 
         # --- ITI ---
@@ -452,7 +391,7 @@ def run_task():
 
         iti_clock = core.Clock()
         while iti_clock.getTime() < ITI:
-            pred_rx.poll_latest(0)
+            link.drain()
             draw_scene()
             win.flip()
             if "escape" in event.getKeys():
@@ -464,7 +403,7 @@ def run_task():
         status_text.text = "Get ready..."
         prep_clock = core.Clock()
         while prep_clock.getTime() < PREP_DURATION:
-            pred_rx.poll_latest(0)
+            link.drain()
             draw_scene()
             win.flip()
             if "escape" in event.getKeys():
@@ -474,9 +413,6 @@ def run_task():
         set_targets(code_to_side(y_true_code))
         cue_text.text = f"IMAGINE: {code_to_name(y_true_code)}"
         status_text.text = "Go!"
-
-        # Handshake FIRST (anti-drift), then trigger (1/2)
-        ctrl_tx.send("TRIAL_START", trial_id=int(trial_id), code=int(y_true_code), t_task=time.time())
         trig.pulse(int(y_true_code))
 
         draw_scene()
@@ -486,15 +422,22 @@ def run_task():
             if "escape" in event.getKeys():
                 raise KeyboardInterrupt
 
-        # --- Wait for prediction for THIS trial_id ---
-        payload = pred_rx.wait_for_trial_id(trial_id=int(trial_id), timeout_s=PRED_WAIT_TIMEOUT_S)
+        # --- Wait for prediction (FIFO: next message is always this trial) ---
+        payload = link.recv(timeout_s=PRED_WAIT_TIMEOUT_S)
 
-        if payload is None or int(payload.get("trial_id", -1)) != int(trial_id):
+        if payload is None:
+            y_pred_code = -1
+            conf = 0.0
+        elif payload.get("rejected", False):
             y_pred_code = -1
             conf = 0.0
         else:
             y_pred_code = int(payload.get("y_pred_code", -1))
             conf = float(payload.get("conf", 0.0))
+            # Alignment check
+            y_true_from_eeg = payload.get("y_true_code")
+            if y_true_from_eeg is not None and int(y_true_from_eeg) != y_true_code:
+                print(f"[WARN] FIFO misalignment: psychopy code={y_true_code}, EEG code={y_true_from_eeg}")
 
         # --- Feedback ---
         cue_text.text = ""
@@ -514,16 +457,15 @@ def run_task():
 
         hold = core.Clock()
         while hold.getTime() < 0.4:
-            pred_rx.poll_latest(0)
+            link.drain()
             draw_scene()
             win.flip()
             if "escape" in event.getKeys():
                 raise KeyboardInterrupt
         set_targets(None)
-        trial_id += 1
 
-    # End raw capture window (worker will close CSV, but keep running)
-    ctrl_tx.send("ONLINE_STOP", t_task=time.time())
+    # End session
+    link.send({"action": "SESSION_STOP"})
 
     # ==============================================================
     # SESSION COMPLETE
@@ -544,8 +486,7 @@ def run_task():
 
     win.close()
     trig.close()
-    pred_rx.close()
-    ctrl_tx.close()
+    link.close()
 
 
 if __name__ == "__main__":

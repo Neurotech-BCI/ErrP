@@ -74,11 +74,7 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class ZMQConfig:
-    # Worker publishes predictions; PsychoPy subscribes.
-    pub_addr: str = "tcp://127.0.0.1:5556"
-    ctrl_addr: str = "tcp://127.0.0.1:5557"  # task PUSH -> worker PULL
-    topic: str = "PRED"  # online prediction topic
-    cal_topic: str = "CAL"  # calibration status topic
+    pair_addr: str = "tcp://127.0.0.1:5556"  # bidirectional PAIR socket
 
 
 @dataclass(frozen=True)
