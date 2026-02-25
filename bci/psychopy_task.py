@@ -113,6 +113,22 @@ class PredictionReceiver:
                 raise KeyboardInterrupt
         return None
 
+    def wait_for_cal_statuses(self, target_statuses: set[str], timeout_s: float) -> dict | None:
+        """Block until a CAL message with a status in target_statuses arrives."""
+        deadline = time.time() + timeout_s
+        self.last_cal = None
+        while time.time() < deadline:
+            remaining = max(0.0, deadline - time.time())
+            timeout_ms = int(min(100, remaining * 1000))
+            self.poll_latest(timeout_ms=timeout_ms)
+            if self.last_cal is not None and self.last_cal.get("status") in target_statuses:
+                result = self.last_cal
+                self.last_cal = None
+                return result
+            if "escape" in event.getKeys():
+                raise KeyboardInterrupt
+        return None
+
     def wait_for_trial_id(self, trial_id: int, timeout_s: float) -> dict | None:
         """Block until a PRED payload with matching trial_id arrives."""
         deadline = time.time() + timeout_s
@@ -158,11 +174,11 @@ class ControlSender:
 
 
 class BalancedBlockScheduler:
-    """Generates balanced LEFT/RIGHT codes in blocks (for online trials)."""
+    """Generates approximately balanced LEFT/RIGHT codes in shuffled blocks."""
 
     def __init__(self, block_size: int, left_code: int, right_code: int, seed: int | None = None):
-        if block_size % 2 != 0:
-            raise ValueError("block_size must be even to balance left/right.")
+        if block_size < 2:
+            raise ValueError("block_size must be >= 2.")
         self.block_size = block_size
         self.left_code = int(left_code)
         self.right_code = int(right_code)
@@ -170,36 +186,15 @@ class BalancedBlockScheduler:
         self._bag: list[int] = []
 
     def _refill(self):
-        half = self.block_size // 2
-        self._bag = [self.left_code] * half + [self.right_code] * half
+        n_left = self.block_size // 2
+        n_right = self.block_size - n_left
+        self._bag = [self.left_code] * n_left + [self.right_code] * n_right
         self.rng.shuffle(self._bag)
 
     def next_code(self) -> int:
         if not self._bag:
             self._refill()
         return self._bag.pop()
-
-
-class CalibrationScheduler:
-    """Balanced L/R calibration schedule with retry on reject."""
-
-    def __init__(self, phases_per_class: int, left_code: int, right_code: int, seed: int | None = None):
-        rng = random.Random(seed)
-        schedule = [int(left_code)] * phases_per_class + [int(right_code)] * phases_per_class
-        rng.shuffle(schedule)
-        self._queue = list(schedule)
-
-    def has_next(self) -> bool:
-        return len(self._queue) > 0
-
-    def peek_next(self) -> int:
-        return self._queue[0]
-
-    def accept(self):
-        self._queue.pop(0)
-
-    def reject(self):
-        pass  # same code stays at front for retry
 
 
 # ---------------- PsychoPy task ----------------
@@ -229,9 +224,10 @@ def run_task():
     PREP_DURATION = 2.0
     MI_DURATION = eeg_cfg.tmax - eeg_cfg.tmin  # online epoch duration (e.g., 2.0s)
     ITI = 3.0
-    N_TRIALS = 50
+    N_LIVE_TRIALS = 60
+    N_CAL_TRIALS = cal_cfg.n_calibration_trials
     PRED_WAIT_TIMEOUT_S = 5.0
-    CAL_WAIT_TIMEOUT_S = cal_cfg.mi_duration_s + 10.0
+    CAL_TRAIN_TIMEOUT_S = 120.0
 
     # UI geometry
     WIN_SIZE = (1200, 700)
@@ -321,8 +317,8 @@ def run_task():
     cue_text.text = (
         "Motor Imagery BCI\n\n"
         "Phase 1: Calibration\n"
-        f"Sustain LEFT/RIGHT imagery for {cal_cfg.mi_duration_s:.0f}s blocks.\n"
-        "After each block, press Y to keep or N to retry.\n\n"
+        f"First {N_CAL_TRIALS} normal trials are used for calibration.\n"
+        "No cursor feedback during calibration.\n\n"
         "Phase 2: Online feedback\n"
         "Short MI trials with cursor feedback.\n"
         "Press SPACE to begin. ESC to quit."
@@ -343,144 +339,103 @@ def run_task():
             ctrl_tx.close()
             return
 
-    # ==============================================================
-    # PHASE 1: CALIBRATION
-    # ==============================================================
-    cal_sched = CalibrationScheduler(cal_cfg.phases_per_class, LEFT, RIGHT, seed=None)
-    total_phases = cal_cfg.phases_per_class * 2
-    completed_phases = 0
+    ctrl_tx.send("SESSION_START", t_task=time.time())
 
-    while cal_sched.has_next():
-        code = cal_sched.peek_next()  # 1=LEFT, 2=RIGHT
-        class_name = code_to_name(code)
+    # ==============================================================
+    # PHASE 1: CALIBRATION (normal trials, no feedback)
+    # ==============================================================
+    trial_id = 0
+    cal_scheduler = BalancedBlockScheduler(block_size=max(2, model_cfg.retrain_every), left_code=LEFT, right_code=RIGHT, seed=None)
+    for cal_idx in range(N_CAL_TRIALS):
+        pred_rx.poll_latest(0)
+        pred_rx.last_payload = None
 
-        # --- Prep ---
+        y_true_code = cal_scheduler.next_code()
         set_targets(None)
-        cursor.pos = (0, 0)
-        cue_text.text = f"Calibration Block {completed_phases + 1} / {total_phases}\nPrepare: {class_name}"
-        status_text.text = f"Sustain imagery for {cal_cfg.mi_duration_s:.0f}s when cued."
+        cue_text.text = ""
+        status_text.text = f"Calibration Trial {cal_idx + 1}/{N_CAL_TRIALS}"
+        reset_cursor(duration=0.15)
+
+        iti_clock = core.Clock()
+        while iti_clock.getTime() < ITI:
+            pred_rx.poll_latest(0)
+            draw_scene()
+            win.flip()
+            if "escape" in event.getKeys():
+                raise KeyboardInterrupt
+
+        set_targets(None)
+        cue_text.text = f"Prepare: {code_to_name(y_true_code)}"
+        status_text.text = "Get ready..."
         prep_clock = core.Clock()
-        while prep_clock.getTime() < cal_cfg.prep_duration_s:
+        while prep_clock.getTime() < PREP_DURATION:
+            pred_rx.poll_latest(0)
             draw_scene()
             win.flip()
             if "escape" in event.getKeys():
                 raise KeyboardInterrupt
 
-        # --- MI onset: send CAL_START then trigger (1/2) ---
-        set_targets(code_to_side(code))
-        ctrl_tx.send("CAL_START", code=int(code), t_task=time.time())
-        trig.pulse(int(code))
+        set_targets(code_to_side(y_true_code))
+        cue_text.text = f"IMAGINE: {code_to_name(y_true_code)}"
+        status_text.text = "Calibration (no feedback)"
+        ctrl_tx.send("TRIAL_START", trial_id=int(trial_id), code=int(y_true_code), t_task=time.time())
+        trig.pulse(int(y_true_code))
 
-        # --- Countdown ---
+        draw_scene()
+        win.flip()
         mi_clock = core.Clock()
-        while mi_clock.getTime() < cal_cfg.mi_duration_s:
-            remaining = cal_cfg.mi_duration_s - mi_clock.getTime()
-            cue_text.text = f"IMAGINE: {class_name}"
-            status_text.text = f"Time remaining: {remaining:.1f}s"
-            draw_scene()
-            win.flip()
+        while mi_clock.getTime() < MI_DURATION:
             if "escape" in event.getKeys():
                 raise KeyboardInterrupt
 
-        # --- MI end ---
         set_targets(None)
-        cue_text.text = "STOP"
-        status_text.text = "Collecting data..."
+        cue_text.text = ""
+        status_text.text = "Data captured."
         draw_scene()
         win.flip()
-
-        cal_status = pred_rx.wait_for_cal_status("collected", timeout_s=CAL_WAIT_TIMEOUT_S)
-        if cal_status is None:
-            cue_text.text = "Worker did not respond.\nPress SPACE to retry."
-            status_text.text = ""
-            draw_scene()
-            win.flip()
-            wait_for_space()
-            continue
-
-        # --- User accept / reject ---
-        cue_text.text = f"Block complete ({class_name})\nDid you maintain good imagery?"
-        status_text.text = "Y = Keep  /  N = Retry"
-        draw_scene()
-        win.flip()
-
-        decision = None
-        while decision is None:
-            keys = event.getKeys()
-            if "y" in keys:
-                decision = "keep"
-            elif "n" in keys:
-                decision = "reject"
-            elif "escape" in keys:
-                raise KeyboardInterrupt
-            draw_scene()
-            win.flip()
-
-        if decision == "keep":
-            ctrl_tx.send("CAL_KEEP")
-            cal_sched.accept()
-            completed_phases += 1
-
-            kept_status = pred_rx.wait_for_cal_status("kept", timeout_s=10.0)
-            if kept_status:
-                n_kept = kept_status.get("n_kept", "?")
-                n_total = kept_status.get("n_total", "?")
-                total_eps = kept_status.get("cal_epochs_so_far", "?")
-                cue_text.text = f"Kept {n_kept}/{n_total} epochs (artifact check)\nTotal calibration epochs: {total_eps}"
-            else:
-                cue_text.text = "Block kept."
-            status_text.text = "Press SPACE to continue."
-            draw_scene()
-            win.flip()
-            wait_for_space()
-        else:
-            ctrl_tx.send("CAL_REJECT")
-            cal_sched.reject()
-            cue_text.text = f"Block rejected. Will retry {class_name}."
-            status_text.text = "Press SPACE to continue."
-            draw_scene()
-            win.flip()
-            wait_for_space()
-
-    # --- Signal calibration complete ---
-    ctrl_tx.send("CAL_DONE")
+        core.wait(0.2)
+        trial_id += 1
 
     cue_text.text = "Training classifier on calibration data...\nPlease wait."
     status_text.text = ""
     draw_scene()
     win.flip()
 
-    trained_status = pred_rx.wait_for_cal_status("trained", timeout_s=60.0)
-    if trained_status:
+    cal_result = pred_rx.wait_for_cal_statuses({"trained", "error"}, timeout_s=CAL_TRAIN_TIMEOUT_S)
+    if cal_result and cal_result.get("status") == "trained":
+        trained_status = cal_result
         cv_mean = trained_status.get("cv_mean", 0)
         cv_std = trained_status.get("cv_std", 0)
         n_epochs = trained_status.get("n_epochs", 0)
-        n_per_class = trained_status.get("n_per_class", {"1": 0, "2": 0})
+        n_per_class = trained_status.get("n_per_class", {str(LEFT): 0, str(RIGHT): 0})
         best_C = trained_status.get("best_C", None)
         cue_text.text = (
             f"Calibration Complete!\n\n"
             f"Cross-validated accuracy: {cv_mean:.1%} +/- {cv_std:.1%}\n"
-            f"Epochs: {n_epochs} (L={n_per_class.get('1', 0)}, R={n_per_class.get('2', 0)})\n"
+            f"Epochs: {n_epochs} "
+            f"(L={n_per_class.get(str(LEFT), 0)}, R={n_per_class.get(str(RIGHT), 0)})\n"
             f"Selected C: {best_C}\n\n"
             f"Press SPACE to begin online phase."
         )
+    elif cal_result and cal_result.get("status") == "error":
+        cue_text.text = f"Calibration training error:\n{cal_result.get('message', 'unknown')}\n\nPress SPACE to continue."
     else:
-        cue_text.text = "Calibration complete.\nPress SPACE to begin online phase."
+        cue_text.text = "Calibration training timed out.\nPress SPACE to begin online phase."
     status_text.text = ""
     draw_scene()
     win.flip()
     wait_for_space()
 
-    # Inform worker that online phase is starting (for raw CSV capture)
+    # Enable live predictions. Raw capture is already active from SESSION_START.
     ctrl_tx.send("ONLINE_START", t_task=time.time())
 
     # ==============================================================
     # PHASE 2: ONLINE TRIALS
     # ==============================================================
-    scheduler = BalancedBlockScheduler(block_size=model_cfg.retrain_every, left_code=LEFT, right_code=RIGHT, seed=None)
+    scheduler = BalancedBlockScheduler(block_size=max(2, model_cfg.retrain_every), left_code=LEFT, right_code=RIGHT, seed=None)
     correct_count = 0
 
-    for t_idx in range(N_TRIALS):
+    for live_idx in range(N_LIVE_TRIALS):
         pred_rx.poll_latest(0)
         pred_rx.last_payload = None
 
@@ -489,10 +444,10 @@ def run_task():
         # --- ITI ---
         set_targets(None)
         cue_text.text = ""
-        if t_idx > 0:
-            status_text.text = f"Trial {t_idx+1}/{N_TRIALS} | Accuracy: {correct_count}/{t_idx}"
+        if live_idx > 0:
+            status_text.text = f"Live Trial {live_idx + 1}/{N_LIVE_TRIALS} | Accuracy: {correct_count}/{live_idx}"
         else:
-            status_text.text = f"Trial 1/{N_TRIALS}"
+            status_text.text = f"Live Trial 1/{N_LIVE_TRIALS}"
         reset_cursor(duration=0.15)
 
         iti_clock = core.Clock()
@@ -521,7 +476,7 @@ def run_task():
         status_text.text = "Go!"
 
         # Handshake FIRST (anti-drift), then trigger (1/2)
-        ctrl_tx.send("TRIAL_START", trial_id=int(t_idx), code=int(y_true_code), t_task=time.time())
+        ctrl_tx.send("TRIAL_START", trial_id=int(trial_id), code=int(y_true_code), t_task=time.time())
         trig.pulse(int(y_true_code))
 
         draw_scene()
@@ -532,9 +487,9 @@ def run_task():
                 raise KeyboardInterrupt
 
         # --- Wait for prediction for THIS trial_id ---
-        payload = pred_rx.wait_for_trial_id(trial_id=int(t_idx), timeout_s=PRED_WAIT_TIMEOUT_S)
+        payload = pred_rx.wait_for_trial_id(trial_id=int(trial_id), timeout_s=PRED_WAIT_TIMEOUT_S)
 
-        if payload is None or int(payload.get("trial_id", -1)) != int(t_idx):
+        if payload is None or int(payload.get("trial_id", -1)) != int(trial_id):
             y_pred_code = -1
             conf = 0.0
         else:
@@ -565,6 +520,7 @@ def run_task():
             if "escape" in event.getKeys():
                 raise KeyboardInterrupt
         set_targets(None)
+        trial_id += 1
 
     # End raw capture window (worker will close CSV, but keep running)
     ctrl_tx.send("ONLINE_STOP", t_task=time.time())
@@ -574,7 +530,7 @@ def run_task():
     # ==============================================================
     cue_text.text = (
         f"Session complete.\n"
-        f"Online accuracy: {correct_count}/{N_TRIALS}\n\n"
+        f"Online accuracy: {correct_count}/{N_LIVE_TRIALS}\n\n"
         f"Stop the worker (Ctrl+C) to save data\n"
         f"and see final cross-validated accuracy.\n"
         f"Press ESC to close."

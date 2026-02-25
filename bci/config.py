@@ -54,21 +54,14 @@ class EEGConfig:
 
 @dataclass(frozen=True)
 class CalibrationConfig:
-    # Sustained MI duration (seconds) AFTER cal_tmin offset
-    mi_duration_s: float = 10.0
-
-    # Epoch a single CAL_START trigger into a long segment with:
-    # [cal_tmin, cal_tmin + mi_duration_s]
-    cal_tmin: float = 0.5
-
-    phases_per_class: int = 5  # accepted blocks needed per class
-    prep_duration_s: float = 2.0  # "Prepare: LEFT/RIGHT" cue duration
+    # Number of initial normal trials to use for calibration (no feedback).
+    n_calibration_trials: int = 20
 
 
 @dataclass(frozen=True)
 class ModelConfig:
     # Retrain every N new accepted epochs
-    retrain_every: int = 5
+    retrain_every: int = 10
 
     use_riemann: bool = True  # if False, use CSP+LR; if True, use Riemannian geometry approach
     # CSP configuration
@@ -99,5 +92,5 @@ class SerialConfig:
 class SessionConfig:
     name: str = "session_1"  # base filename for saved data
 
-    # Raw stream capture during online phase
+    # Raw stream capture during full session (calibration + online)
     raw_csv_suffix: str = "_raw.csv"
