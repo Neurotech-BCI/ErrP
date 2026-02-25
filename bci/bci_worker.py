@@ -4,8 +4,6 @@ from __future__ import annotations
 import time
 import json
 import csv
-from collections import deque
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -112,8 +110,15 @@ def _make_classifier_csp_fixedC(n_csp_components: int, C: float) -> Pipeline:
 # ----------------------------------------------------------------
 
 
-def _encode_msg(topic: str, payload: dict) -> bytes:
-    return f"{topic} {json.dumps(payload)}".encode("utf-8")
+def _send_json(sock: zmq.Socket, payload: dict):
+    sock.send_string(json.dumps(payload))
+
+
+def _poll_recv_json(sock: zmq.Socket, poller: zmq.Poller, timeout_ms: int = 0) -> dict | None:
+    socks = dict(poller.poll(timeout_ms))
+    if sock in socks:
+        return json.loads(sock.recv_string())
+    return None
 
 
 def _run_cv(X: np.ndarray, y: np.ndarray, model_cfg: ModelConfig, fixed_C: float | None = None) -> tuple[float, float, np.ndarray]:
@@ -174,52 +179,6 @@ def _train_initial_classifier(
         str(int(right_code)): int(np.sum(y_cal_arr == int(right_code))),
     }
     return classifier, best_C, cv_mean, cv_std, n_per_class
-
-
-@dataclass
-class PendingTrial:
-    trial_id: int
-    code: int  # 1/2
-    t_task: float | None = None
-    t_received: float | None = None
-
-
-@dataclass
-class UnmatchedEpoch:
-    X: np.ndarray  # (n_channels, n_samples)
-    code: int  # 1/2
-    t_epoch: float
-
-
-def _match_trials_to_epochs(
-    pending: deque[PendingTrial],
-    unmatched: deque[UnmatchedEpoch],
-) -> list[tuple[PendingTrial, UnmatchedEpoch]]:
-    """
-    Match pending TRIAL_START handshakes to epochs by code (1/2).
-    Preserve ordering without assuming perfect timing or delivery ordering.
-    """
-    matches: list[tuple[PendingTrial, UnmatchedEpoch]] = []
-    if not pending or not unmatched:
-        return matches
-
-    new_pending = deque()
-    while pending:
-        pt = pending.popleft()
-        found_idx = None
-        for i, ue in enumerate(unmatched):
-            if int(ue.code) == int(pt.code):
-                found_idx = i
-                break
-        if found_idx is None:
-            new_pending.append(pt)
-            continue
-        ue = unmatched[found_idx]
-        del unmatched[found_idx]
-        matches.append((pt, ue))
-
-    pending.extend(new_pending)
-    return matches
 
 
 class RawCSVRecorder:
@@ -321,17 +280,12 @@ def main():
 
     reject_thresh = eeg.reject_peak_to_peak
 
-    # --- ZMQ sockets ---
+    # --- ZMQ PAIR socket ---
     ctx = zmq.Context.instance()
-    pub = ctx.socket(zmq.PUB)
-    pub.bind(zmq_cfg.pub_addr)
-
-    ctrl = ctx.socket(zmq.PULL)
-    ctrl.bind(zmq_cfg.ctrl_addr)
-
-    ctrl_poller = zmq.Poller()
-    ctrl_poller.register(ctrl, zmq.POLLIN)
-    time.sleep(0.3)
+    pair = ctx.socket(zmq.PAIR)
+    pair.bind(zmq_cfg.pair_addr)
+    poller = zmq.Poller()
+    poller.register(pair, zmq.POLLIN)
 
     # --- Connect to EEG LSL stream ---
     stream_bufsize = max(30.0, eeg.tmax + 5.0)
@@ -376,16 +330,12 @@ def main():
     y_all: list[int] = []
     total_accepted = 0
     last_train_at = 0
-    calibration_trials_target = int(cal_cfg.n_calibration_trials)
-    calibration_trials_seen = 0
-    calibration_trained = False
-    calibration_train_attempted = False
 
-    online_started = False
-    print(f"BCI worker running. Awaiting {calibration_trials_target} calibration trials, then ONLINE_START.")
+    phase = "IDLE"  # IDLE -> CALIBRATING -> TRAINING -> TRAINED -> ONLINE -> STOPPED
+    n_cal_target = int(cal_cfg.n_calibration_trials)
+    train_deadline: float | None = None
 
-    pending_trials: deque[PendingTrial] = deque()
-    unmatched_epochs: deque[UnmatchedEpoch] = deque()
+    print(f"BCI worker running. Awaiting SESSION_START from psychopy.")
 
     raw_recorder: RawCSVRecorder | None = None
     raw_csv_path = f"{session_cfg.name}{session_cfg.raw_csv_suffix}"
@@ -434,166 +384,160 @@ def main():
 
     try:
         while True:
-            # Always poll control messages (SESSION_START, ONLINE_START/STOP, TRIAL_START)
-            socks = dict(ctrl_poller.poll(0))
-            if ctrl in socks:
-                cmd = json.loads(ctrl.recv_string())
+            # ---- (A) Check for command from psychopy ----
+            cmd = _poll_recv_json(pair, poller, timeout_ms=0)
+            if cmd is not None:
                 action = cmd.get("action")
 
                 if action == "SESSION_START":
                     _ensure_raw_recorder_started()
+                    _send_json(pair, {"status": "ready"})
+                    phase = "CALIBRATING"
                     print("[SESSION] SESSION_START received. Raw capture enabled.")
 
-                if action == "ONLINE_START":
-                    if not calibration_trained:
-                        print("[ONLINE] ONLINE_START ignored: calibration model is not trained yet.")
-                    elif not online_started:
-                        online_started = True
-                        _ensure_raw_recorder_started()
-                        print("[ONLINE] ONLINE_START received. Predictions enabled.")
+                elif action == "TRAIN":
+                    n_cal_target = int(cmd.get("n_trials", cal_cfg.n_calibration_trials))
+                    train_deadline = time.time() + 30.0
+                    phase = "TRAINING"
+                    print(f"[TRAIN] Received. Waiting for {n_cal_target} accepted epochs (have {len(y_cal)})...")
 
-                elif action == "ONLINE_STOP":
+                    # If we already have enough epochs (accumulated during calibration), train immediately
+                    if len(y_cal) >= n_cal_target:
+                        try:
+                            classifier, best_C, cv_mean, cv_std, n_per_class = _train_initial_classifier(
+                                X_cal, y_cal, model_cfg, LEFT, RIGHT,
+                            )
+                            last_train_at = total_accepted
+                            phase = "TRAINED"
+                            _send_json(pair, {
+                                "status": "trained",
+                                "cv_mean": cv_mean,
+                                "cv_std": cv_std,
+                                "n_epochs": len(y_cal),
+                                "n_per_class": n_per_class,
+                                "best_C": best_C,
+                            })
+                            print(f"[CAL] Trained on {len(y_cal)} epochs. CV={cv_mean:.3f}+/-{cv_std:.3f}")
+                        except Exception as exc:
+                            phase = "TRAINED"
+                            _send_json(pair, {"status": "error", "message": str(exc)})
+                            print(f"[CAL] Training failed: {exc}")
+
+                elif action == "ONLINE_START":
+                    if phase != "TRAINED":
+                        print("[ONLINE] ONLINE_START ignored: not trained yet.")
+                    else:
+                        phase = "ONLINE"
+                        _ensure_raw_recorder_started()
+                        _send_json(pair, {"status": "ack"})
+                        print("[ONLINE] Predictions enabled.")
+
+                elif action == "SESSION_STOP":
                     if raw_recorder is not None and raw_recorder.is_active():
                         raw_recorder.stop()
+                    phase = "STOPPED"
+                    print("[SESSION] SESSION_STOP received.")
 
-                elif action == "TRIAL_START":
-                    trial_id = int(cmd["trial_id"])
-                    code = int(cmd["code"])
-                    t_task = float(cmd.get("t_task", time.time()))
-                    if code in (LEFT, RIGHT):
-                        pending_trials.append(PendingTrial(trial_id=trial_id, code=code, t_task=t_task, t_received=time.time()))
-
-            # Update raw recorder (tap) if active. This does NOT affect epoching.
+            # ---- (B) Raw CSV tap (independent) ----
             if raw_recorder is not None and raw_recorder.is_active():
                 raw_recorder.update_from_stream(stream, picks="all")
 
-            # Pull new epochs from online EpochsStream (event-locked to 1/2 only)
+            # ---- (C) Pull new epochs from EpochsStream ----
             n_new = epochs_online.n_new_epochs
             if n_new > 0:
                 X_new = epochs_online.get_data(n_epochs=n_new, picks="eeg")
                 X_new = _filter_mi_epochs(X_new)
                 codes_new = epochs_online.events[-n_new:]
-                now = time.time()
+
                 for i in range(n_new):
                     code = int(codes_new[i])
-                    if code in (LEFT, RIGHT):
-                        unmatched_epochs.append(UnmatchedEpoch(X=X_new[i], code=code, t_epoch=now))
-
-            # Match trial handshakes to epochs (no drift) for both calibration and live phases.
-            matches = _match_trials_to_epochs(pending_trials, unmatched_epochs)
-
-            for pt, ue in matches:
-                # Store with optional artifact rejection.
-                if reject_thresh is not None:
-                    ptp = np.ptp(ue.X, axis=-1).max()
-                    if ptp > reject_thresh:
-                        if not calibration_trained:
-                            calibration_trials_seen += 1
+                    if code not in (LEFT, RIGHT):
                         continue
 
-                is_calibration_trial = not calibration_trained
-                if is_calibration_trial:
-                    calibration_trials_seen += 1
+                    epoch_data = X_new[i]
 
-                if classifier is not None and online_started:
-                    x_i = ue.X[np.newaxis, ...]
-                    proba = classifier.predict_proba(x_i)[0]
-                    classes = classifier.named_steps["clf"].classes_
-                    y_pred_code = int(classes[int(np.argmax(proba))])
-                    conf = float(np.max(proba))
-                    p_right = _proba_for_code(proba, classes, RIGHT)
+                    # Artifact rejection
+                    if reject_thresh is not None:
+                        ptp = np.ptp(epoch_data, axis=-1).max()
+                        if ptp > reject_thresh:
+                            if phase == "ONLINE":
+                                _send_json(pair, {"y_pred_code": None, "rejected": True})
+                            continue
 
-                    pub.send(
-                        _encode_msg(
-                            zmq_cfg.topic,
-                            dict(
-                                trial_id=int(pt.trial_id),
-                                y_true_code=int(pt.code),
-                                y_pred_code=int(y_pred_code),
-                                conf=conf,
-                                p_right=p_right,
-                                best_C=best_C,
-                                n_total_epochs=int(len(y_store)),
-                                t_pred=time.time(),
-                                t_epoch=float(ue.t_epoch),
-                                t_task=float(pt.t_task) if pt.t_task is not None else None,
-                                t_ctrl_received=float(pt.t_received) if pt.t_received is not None else None,
-                            ),
-                        )
-                    )
+                    # Accumulate epoch
+                    X_all.append(epoch_data)
+                    y_all.append(code)
+                    X_store.append(epoch_data)
+                    y_store.append(code)
+                    total_accepted += 1
 
-                if is_calibration_trial:
-                    X_cal.append(ue.X)
-                    y_cal.append(int(pt.code))
+                    if phase in ("CALIBRATING", "TRAINING"):
+                        X_cal.append(epoch_data)
+                        y_cal.append(code)
 
-                X_store.append(ue.X)
-                y_store.append(int(pt.code))  # 1/2
-                X_all.append(ue.X)
-                y_all.append(int(pt.code))
-                total_accepted += 1
-
-                if is_calibration_trial:
-                    pub.send(
-                        _encode_msg(
-                            zmq_cfg.cal_topic,
-                            {
-                                "status": "progress",
-                                "n_done": int(calibration_trials_seen),
-                                "n_target": int(calibration_trials_target),
-                                "n_accepted": int(len(y_cal)),
-                            },
-                        )
-                    )
-
-                if (not calibration_trained) and (not calibration_train_attempted) and (calibration_trials_seen >= calibration_trials_target):
-                    calibration_train_attempted = True
-                    try:
-                        classifier, best_C, cv_mean, cv_std, n_per_class = _train_initial_classifier(
-                            X_cal=X_cal,
-                            y_cal=y_cal,
-                            model_cfg=model_cfg,
-                            left_code=LEFT,
-                            right_code=RIGHT,
-                        )
-                    except Exception as exc:
-                        msg = f"Calibration training failed: {exc}"
-                        print(f"[CAL] {msg}")
-                        pub.send(_encode_msg(zmq_cfg.cal_topic, {"status": "error", "message": msg}))
-                    else:
-                        calibration_trained = True
-                        last_train_at = total_accepted
-                        pub.send(
-                            _encode_msg(
-                                zmq_cfg.cal_topic,
-                                {
-                                    "status": "trained",
-                                    "cv_mean": cv_mean,
-                                    "cv_std": cv_std,
-                                    "n_epochs": int(len(y_cal)),
-                                    "n_per_class": n_per_class,
-                                    "best_C": best_C,
-                                },
+                    # Check if training can now proceed
+                    if phase == "TRAINING" and len(y_cal) >= n_cal_target:
+                        try:
+                            classifier, best_C, cv_mean, cv_std, n_per_class = _train_initial_classifier(
+                                X_cal, y_cal, model_cfg, LEFT, RIGHT,
                             )
-                        )
-                        print(
-                            f"[CAL] Trained on {len(y_cal)} accepted calibration epochs "
-                            f"from {calibration_trials_seen}/{calibration_trials_target} trials."
-                        )
+                            last_train_at = total_accepted
+                            phase = "TRAINED"
+                            _send_json(pair, {
+                                "status": "trained",
+                                "cv_mean": cv_mean,
+                                "cv_std": cv_std,
+                                "n_epochs": len(y_cal),
+                                "n_per_class": n_per_class,
+                                "best_C": best_C,
+                            })
+                            print(f"[CAL] Trained on {len(y_cal)} epochs. CV={cv_mean:.3f}+/-{cv_std:.3f}")
+                        except Exception as exc:
+                            phase = "TRAINED"
+                            _send_json(pair, {"status": "error", "message": str(exc)})
+                            print(f"[CAL] Training failed: {exc}")
 
-            # Sliding window
+                    # Online prediction
+                    if phase == "ONLINE" and classifier is not None:
+                        x_i = epoch_data[np.newaxis, ...]
+                        proba = classifier.predict_proba(x_i)[0]
+                        classes = classifier.named_steps["clf"].classes_
+                        y_pred_code = int(classes[int(np.argmax(proba))])
+                        conf = float(np.max(proba))
+                        p_right = _proba_for_code(proba, classes, RIGHT)
+
+                        _send_json(pair, {
+                            "y_pred_code": y_pred_code,
+                            "y_true_code": code,
+                            "conf": conf,
+                            "p_right": p_right,
+                        })
+
+            # ---- (D) Training timeout ----
+            if phase == "TRAINING" and train_deadline is not None and time.time() > train_deadline:
+                _send_json(pair, {
+                    "status": "error",
+                    "message": f"Timeout: only {len(y_cal)}/{n_cal_target} epochs arrived within deadline",
+                })
+                phase = "TRAINED"
+                train_deadline = None
+                print(f"[CAL] Training timeout: {len(y_cal)}/{n_cal_target} epochs.")
+
+            # ---- (E) Sliding window ----
             if model_cfg.use_sliding_window and len(y_store) > model_cfg.window_size_epochs:
-                X_store = X_store[-model_cfg.window_size_epochs :]
-                y_store = y_store[-model_cfg.window_size_epochs :]
+                X_store = X_store[-model_cfg.window_size_epochs:]
+                y_store = y_store[-model_cfg.window_size_epochs:]
 
-            # Retrain schedule (fixed C)
-            if calibration_trained and (total_accepted - last_train_at) >= model_cfg.retrain_every and len(y_store) >= 4:
-                X_train = np.stack(X_store, axis=0)
-                y_train = np.array(y_store, dtype=int)
-                if classifier is not None:
+            # ---- (F) Online retraining schedule ----
+            if phase == "ONLINE" and classifier is not None:
+                if (total_accepted - last_train_at) >= model_cfg.retrain_every and len(y_store) >= 4:
+                    X_train = np.stack(X_store, axis=0)
+                    y_train = np.array(y_store, dtype=int)
                     classifier.fit(X_train, y_train)
                     last_train_at = total_accepted
 
-            if n_new == 0 and not matches:
+            # ---- (G) Idle sleep ----
+            if n_new == 0 and cmd is None:
                 time.sleep(0.002)
 
     except KeyboardInterrupt:
@@ -624,11 +568,10 @@ def main():
                     resource.disconnect()
             except Exception:
                 pass
-        for sock in [pub, ctrl]:
-            try:
-                sock.close(0)
-            except Exception:
-                pass
+        try:
+            pair.close(0)
+        except Exception:
+            pass
         try:
             ctx.term()
         except Exception:
