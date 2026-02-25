@@ -18,7 +18,7 @@ filepath = r"/Users/chris/Desktop/coding projects/LSL_testing/eeg_data.csv" # wh
 streams = resolve_streams(timeout=5.0)
 print(f"Found {len(streams)} stream(s):")
 for stream in streams:
-    print(f"  - {stream.name} ({stream.stype}) @ {stream.sfreq} Hz")
+    print(f"{stream.name} ({stream.stype}) at {stream.sfreq} Hz")
 
 # Open stream
 #stream = StreamLSL(bufsize=10, name="WS-default", stype="EEG") for wearable

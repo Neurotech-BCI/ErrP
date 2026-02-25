@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 streams = resolve_streams(timeout=5.0)
 print(f"Found {len(streams)} stream(s):")
 for stream in streams:
-    print(f"  - {stream.name} ({stream.stype}) @ {stream.sfreq} Hz")
+    print(f"{stream.name} ({stream.stype}) at {stream.sfreq} Hz")
 
 stream = StreamLSL(bufsize=10, name="WS-default", stype="EEG")
 stream.connect(acquisition_delay=0.1, timeout=5) # try .connect(acquisition_delay=0.1, timeout=5) if running into issues with sync
