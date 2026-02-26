@@ -20,7 +20,7 @@ ERROR_PROB = 0.25
 N_TRIALS = 50
 
 # --- Trigger Port (commented out for testing) ---
-PORT = 'COM6'
+PORT = 'COM8'
 
 # 4 triggers total:
 NON_ERROR_TRIGGER = 1                 # baseline / no error

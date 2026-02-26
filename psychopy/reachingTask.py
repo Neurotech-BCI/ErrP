@@ -5,7 +5,7 @@ import platform
 
 # --- 1. Multi-Platform & Offline Configuration ---
 if platform.system() == "Windows":
-    PORT = "COM6"
+    PORT = "COM8"
 else:
     # MacBook port: check with 'ls /dev/cu.usb*'
     PORT = "/dev/cu.usbserial-10" 

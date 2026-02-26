@@ -79,7 +79,7 @@ class ZMQConfig:
 
 @dataclass(frozen=True)
 class SerialConfig:
-    port: str = "COM6"
+    port: str = "COM8"
     baudrate: int = 115200
     pulse_width_s: float = 0.01  # send code then reset-to-0 after this
 
