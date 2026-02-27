@@ -11,10 +11,8 @@ def find_port_by_vid_pid(vid, pid):
             return port.device
     return None
 
-
-found = find_port_by_vid_pid(TRIGGER_HUB_VID, TRIGGER_HUB_PID)
-print(found)
-
+trigger_port = find_port_by_vid_pid(TRIGGER_HUB_VID, TRIGGER_HUB_PID)
+print(trigger_port)
 
 for port in ports:
     print(port.device)
