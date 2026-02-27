@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import serial.tools.list_ports
 
 @dataclass(frozen=True)
 class LSLConfig:
@@ -44,7 +43,7 @@ class EEGConfig:
 
     # Online epoching window (motor imagery)
     tmin: float = 0.5
-    tmax: float = 2.5  # online MI window length (seconds)
+    tmax: float = 3.5  # online MI window length (seconds)
 
     # Baseline correction (optional; keep None for pure MI windows)
     baseline: tuple[float | None, float | None] | None = None
@@ -70,18 +69,14 @@ class ModelConfig:
 
     # Use sliding window to adapt to nonstationarity (user learning)
     use_sliding_window: bool = True
-    window_size_epochs: int = 80  # keep last N epochs for retraining
-
-
-@dataclass(frozen=True)
-class ZMQConfig:
-    pair_addr: str = "tcp://127.0.0.1:5556"  # bidirectional PAIR socket
+    window_size_epochs: int = 120  # keep last N epochs for retraining
 
 
 @dataclass(frozen=True)
 class SerialConfig:
-    
+
     def find_port_by_vid_pid(vid: int, pid: int) -> str | None:
+        import serial.tools.list_ports
         for p in serial.tools.list_ports.comports():
             if p.vid == vid and p.pid == pid:
                 return p.device
@@ -96,7 +91,7 @@ class SerialConfig:
 
 @dataclass(frozen=True)
 class SessionConfig:
-    name: str = "matthew_25_02_26_handclench_real"  # base filename for saved data
+    name: str = "session_1"  # base filename for saved data
 
     # Raw stream capture during full session (calibration + online)
     raw_csv_suffix: str = "_raw.csv"
