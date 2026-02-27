@@ -79,7 +79,16 @@ class ZMQConfig:
 
 @dataclass(frozen=True)
 class SerialConfig:
-    port: str = "COM8"
+    
+    def find_port_by_vid_pid(vid: int, pid: int) -> str | None:
+        for p in serial.tools.list_ports.comports():
+            if p.vid == vid and p.pid == pid:
+                return p.device
+        raise RuntimeError(
+            "No valid trigger hub found"
+        )
+
+    port: str = find_port_by_vid_pid(vid=0x2341, pid=0x8037)
     baudrate: int = 115200
     pulse_width_s: float = 0.01  # send code then reset-to-0 after this
 
