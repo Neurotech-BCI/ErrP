@@ -15,7 +15,7 @@ def find_port_by_vid_pid(vid, pid):
 found = find_port_by_vid_pid(TRIGGER_HUB_VID, TRIGGER_HUB_PID)
 print(found)
 
-
+"""
 for port in ports:
     print(port.device)
     print(port.name)
@@ -23,7 +23,7 @@ for port in ports:
     print(port.serial_number)
     print(port.hwid)
     print()
-
+"""
 #BT_ADAPTER_VID = 
 #BT_ADAPTER_PID = 
 

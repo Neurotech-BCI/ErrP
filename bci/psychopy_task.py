@@ -143,7 +143,7 @@ def run_task():
     PREP_DURATION = 2.0
     MI_DURATION = eeg_cfg.tmax - eeg_cfg.tmin  # online epoch duration (e.g., 2.0s)
     ITI = 3.0
-    N_LIVE_TRIALS = 60
+    N_LIVE_TRIALS = 110
     N_CAL_TRIALS = cal_cfg.n_calibration_trials
     PRED_WAIT_TIMEOUT_S = 5.0
     CAL_TRAIN_TIMEOUT_S = 120.0
@@ -164,6 +164,7 @@ def run_task():
     # Setup comms
     link = BCILink(zmq_cfg.pair_addr)
 
+    
     trig = TriggerPort(ser_cfg.port, ser_cfg.baudrate, ser_cfg.pulse_width_s)
     trig.open()
 

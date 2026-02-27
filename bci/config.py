@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import serial.tools.list_ports
 
 @dataclass(frozen=True)
 class LSLConfig:
@@ -55,7 +56,7 @@ class EEGConfig:
 @dataclass(frozen=True)
 class CalibrationConfig:
     # Number of initial normal trials to use for calibration (no feedback).
-    n_calibration_trials: int = 20
+    n_calibration_trials: int = 40
 
 
 @dataclass(frozen=True)
@@ -79,14 +80,23 @@ class ZMQConfig:
 
 @dataclass(frozen=True)
 class SerialConfig:
-    port: str = "COM8"
+    
+    def find_port_by_vid_pid(vid: int, pid: int) -> str | None:
+        for p in serial.tools.list_ports.comports():
+            if p.vid == vid and p.pid == pid:
+                return p.device
+        raise RuntimeError(
+            "No valid trigger hub found"
+        )
+
+    port: str = find_port_by_vid_pid(vid=0x2341, pid=0x8037)
     baudrate: int = 115200
     pulse_width_s: float = 0.01  # send code then reset-to-0 after this
 
 
 @dataclass(frozen=True)
 class SessionConfig:
-    name: str = "session_1"  # base filename for saved data
+    name: str = "matthew_25_02_26_handclench_real"  # base filename for saved data
 
     # Raw stream capture during full session (calibration + online)
     raw_csv_suffix: str = "_raw.csv"
