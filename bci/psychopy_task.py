@@ -141,7 +141,7 @@ def run_task(fname: str):
     MI_DURATION = eeg_cfg.tmax - eeg_cfg.tmin  # e.g. 2.0 s
     ITI = 3.0
     N_CAL_TRIALS = cal_cfg.n_calibration_trials
-    N_LIVE_TRIALS = 30
+    N_LIVE_TRIALS = 20
     EPOCH_POLL_TIMEOUT = eeg_cfg.tmin + 1.5  # seconds to wait for epoch after MI
 
     # UI geometry & colours

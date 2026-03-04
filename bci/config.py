@@ -34,7 +34,7 @@ class StimConfig:
 @dataclass(frozen=True)
 class EEGConfig:
     picks: tuple[str, ...] = ("Pz", "F4", "C4", "P4", "P3", "C3", "F3")
-    # picks: tuple[str, ...] = ("C4", "C3")
+    #picks: tuple[str, ...] = ("C4", "C3")
 
     # Real-time filtering (stream-level)
     l_freq: float = 8.0  # MI mu/beta emphasis
@@ -55,15 +55,15 @@ class EEGConfig:
 @dataclass(frozen=True)
 class CalibrationConfig:
     # Number of initial normal trials to use for calibration (no feedback).
-    n_calibration_trials: int = 80
+    n_calibration_trials: int = 100
     # Maximum calibration trials in a row before a mandatory break.
-    max_trials_before_break: int = 30
+    max_trials_before_break: int = 25
 
 
 @dataclass(frozen=True)
 class ModelConfig:
     # Retrain every N new accepted epochs
-    retrain_every: int = 30
+    retrain_every: int = 20
 
     use_riemann: bool = True  # if False, use CSP+LR; if True, use Riemannian geometry approach
     # CSP configuration
@@ -98,8 +98,8 @@ class MentalCommandLabelConfig:
     command1_code: int = 11
     command2_code: int = 12
 
-    command1_name: str = "Command 1"
-    command2_name: str = "Command 2"
+    command1_name: str = "LEFT"
+    command2_name: str = "RIGHT"
 
     def all_codes(self) -> tuple[int, int, int]:
         return (self.neutral_code, self.command1_code, self.command2_code)
@@ -109,12 +109,12 @@ class MentalCommandLabelConfig:
 class MentalCommandTaskConfig:
     # Emotiv Mental Command training uses ~8 second training blocks.
     register_duration_s: float = 8.0
-    rest_duration_s: float = 2.0
+    rest_duration_s: float = 3.0
     prep_duration_s: float = 1.5
 
     # Repetitions per class for registration.
-    n_register_neutral: int = 5
-    n_register_command: int = 5
+    n_register_neutral: int = 6
+    n_register_command: int = 6
 
     # Sliding-window extraction from registration blocks.
     train_window_s: float = 1.0
