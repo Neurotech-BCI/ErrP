@@ -1,1 +1,5 @@
-bci/__pycache__/config.cpython-310.pyc
+__pycache__/
+*.pyc
+.venv/
+data/
+

@@ -11,6 +11,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix, f1_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from mne.decoding import CSP
 
 from config import EEGConfig, MentalCommandModelConfig
 
@@ -59,6 +61,17 @@ def split_windows(
 
 
 def make_mental_command_classifier(model_cfg: MentalCommandModelConfig) -> Pipeline:
+    backend = str(getattr(model_cfg, "backend", "riemann_lr")).lower()
+
+    if backend == "csp_lda":
+        return Pipeline(
+            [
+                ("csp", CSP(n_components=int(model_cfg.csp_components), reg="ledoit_wolf", log=True, norm_trace=False)),
+                ("scaler", StandardScaler(with_mean=True, with_std=True)),
+                ("clf", LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto")),
+            ]
+        )
+
     return Pipeline(
         [
             ("cov", Covariances(estimator="oas")),
@@ -69,7 +82,6 @@ def make_mental_command_classifier(model_cfg: MentalCommandModelConfig) -> Pipel
                 LogisticRegression(
                     C=float(model_cfg.C),
                     solver="lbfgs",
-                    multi_class="multinomial",
                     max_iter=int(model_cfg.max_iter),
                     class_weight=model_cfg.class_weight,
                     random_state=42,

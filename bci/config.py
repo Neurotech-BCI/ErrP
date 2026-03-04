@@ -131,10 +131,16 @@ class MentalCommandTaskConfig:
 
 @dataclass(frozen=True)
 class MentalCommandModelConfig:
-    # Riemannian features + multinomial logistic regression.
+    # Backend options: "riemann_lr" (default) or "csp_lda".
+    backend: str = "csp_lda"
+
+    # Riemannian LR hyperparameters.
     C: float = 1.0
     max_iter: int = 1500
     class_weight: str | None = "balanced"
+
+    # CSP + LDA hyperparameters.
+    csp_components: int = 6
 
     # Basic CV quality gate before live mode.
     cv_splits_max: int = 5
