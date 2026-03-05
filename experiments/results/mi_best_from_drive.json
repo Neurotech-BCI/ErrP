@@ -1,0 +1,366 @@
+{
+  "scores": [
+    {
+      "dataset": "03_03_26_winston_live_data.npy",
+      "model": "riemann_lr",
+      "bal_acc_mean": 0.515,
+      "bal_acc_std": 0.08888194417315588,
+      "f1_mean": 0.5087803945104348,
+      "f1_std": 0.09027178326637135,
+      "n": 120,
+      "channels": 2,
+      "samples": 900
+    },
+    {
+      "dataset": "03_03_26_winston_live_data.npy",
+      "model": "riemann_lr_C0.1",
+      "bal_acc_mean": 0.5116666666666667,
+      "bal_acc_std": 0.09168181692983378,
+      "f1_mean": 0.5061534304921664,
+      "f1_std": 0.09390696833434001,
+      "n": 120,
+      "channels": 2,
+      "samples": 900
+    },
+    {
+      "dataset": "03_03_26_winston_live_data.npy",
+      "model": "csp4_lda",
+      "bal_acc_mean": 0.5083333333333333,
+      "bal_acc_std": 0.09052317076000181,
+      "f1_mean": 0.5011455694321314,
+      "f1_std": 0.09099599911277147,
+      "n": 120,
+      "channels": 2,
+      "samples": 900
+    },
+    {
+      "dataset": "03_03_26_winston_live_data.npy",
+      "model": "csp6_lda",
+      "bal_acc_mean": 0.5083333333333333,
+      "bal_acc_std": 0.09052317076000181,
+      "f1_mean": 0.5011455694321314,
+      "f1_std": 0.09099599911277147,
+      "n": 120,
+      "channels": 2,
+      "samples": 900
+    },
+    {
+      "dataset": "03_03_26_winston_live_data.npy",
+      "model": "fbank_riemann",
+      "bal_acc_mean": 0.525,
+      "bal_acc_std": 0.10606601717798211,
+      "f1_mean": 0.5212756242147547,
+      "f1_std": 0.10523425279672943,
+      "n": 120,
+      "channels": 2,
+      "samples": 900
+    },
+    {
+      "dataset": "03_03_26_winston_live_data.npy",
+      "model": "fbank_riemann_wide",
+      "bal_acc_mean": 0.475,
+      "bal_acc_std": 0.08498365855987974,
+      "f1_mean": 0.4689456830458646,
+      "f1_std": 0.08309991288661608,
+      "n": 120,
+      "channels": 2,
+      "samples": 900
+    },
+    {
+      "dataset": "03_03_26_xavier_live_data.npy",
+      "model": "riemann_lr",
+      "bal_acc_mean": 0.4981818181818181,
+      "bal_acc_std": 0.06229760617822478,
+      "f1_mean": 0.48809490891543655,
+      "f1_std": 0.06250585142629056,
+      "n": 110,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "03_03_26_xavier_live_data.npy",
+      "model": "riemann_lr_C0.1",
+      "bal_acc_mean": 0.5109090909090908,
+      "bal_acc_std": 0.0671497647731614,
+      "f1_mean": 0.4993171996688147,
+      "f1_std": 0.07247514119036656,
+      "n": 110,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "03_03_26_xavier_live_data.npy",
+      "model": "csp4_lda",
+      "bal_acc_mean": 0.47818181818181815,
+      "bal_acc_std": 0.08731059784394885,
+      "f1_mean": 0.4688361715180667,
+      "f1_std": 0.08839066637899788,
+      "n": 110,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "03_03_26_xavier_live_data.npy",
+      "model": "csp6_lda",
+      "bal_acc_mean": 0.49454545454545445,
+      "bal_acc_std": 0.09818181818181818,
+      "f1_mean": 0.4863557486186507,
+      "f1_std": 0.10040061938662868,
+      "n": 110,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "03_03_26_xavier_live_data.npy",
+      "model": "fbank_riemann",
+      "bal_acc_mean": 0.5036363636363635,
+      "bal_acc_std": 0.10595492570424338,
+      "f1_mean": 0.496121674430922,
+      "f1_std": 0.10933507292084957,
+      "n": 110,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "03_03_26_xavier_live_data.npy",
+      "model": "fbank_riemann_wide",
+      "bal_acc_mean": 0.52,
+      "bal_acc_std": 0.09541557646110492,
+      "f1_mean": 0.5116661731158568,
+      "f1_std": 0.10087293509753606,
+      "n": 110,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "matthew_25_02_26_mi_data.npy",
+      "model": "riemann_lr",
+      "bal_acc_mean": 0.5016666666666666,
+      "bal_acc_std": 0.08373237791386981,
+      "f1_mean": 0.49573566021845045,
+      "f1_std": 0.0837815190749593,
+      "n": 120,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "matthew_25_02_26_mi_data.npy",
+      "model": "riemann_lr_C0.1",
+      "bal_acc_mean": 0.515,
+      "bal_acc_std": 0.08809716857601675,
+      "f1_mean": 0.5099857168692646,
+      "f1_std": 0.08720931785913563,
+      "n": 120,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "matthew_25_02_26_mi_data.npy",
+      "model": "csp4_lda",
+      "bal_acc_mean": 0.5083333333333333,
+      "bal_acc_std": 0.10341394704992381,
+      "f1_mean": 0.504464723682115,
+      "f1_std": 0.10434898429744793,
+      "n": 120,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "matthew_25_02_26_mi_data.npy",
+      "model": "csp6_lda",
+      "bal_acc_mean": 0.49333333333333335,
+      "bal_acc_std": 0.09180292902613608,
+      "f1_mean": 0.4875427355907431,
+      "f1_std": 0.09058074423758064,
+      "n": 120,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "matthew_25_02_26_mi_data.npy",
+      "model": "fbank_riemann",
+      "bal_acc_mean": 0.44833333333333336,
+      "bal_acc_std": 0.06267198558987723,
+      "f1_mean": 0.44192651985695464,
+      "f1_std": 0.06350870650464632,
+      "n": 120,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "matthew_25_02_26_mi_data.npy",
+      "model": "fbank_riemann_wide",
+      "bal_acc_mean": 0.48,
+      "bal_acc_std": 0.08828615092099351,
+      "f1_mean": 0.47408737999625716,
+      "f1_std": 0.08778631557450185,
+      "n": 120,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "omer_2_23_26_handclench_real_data.npy",
+      "model": "riemann_lr",
+      "bal_acc_mean": 0.6114285714285714,
+      "bal_acc_std": 0.1144284822542902,
+      "f1_mean": 0.6012360104635647,
+      "f1_std": 0.12261169438769184,
+      "n": 70,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "omer_2_23_26_handclench_real_data.npy",
+      "model": "riemann_lr_C0.1",
+      "bal_acc_mean": 0.6285714285714286,
+      "bal_acc_std": 0.11248582677159731,
+      "f1_mean": 0.6230040253863783,
+      "f1_std": 0.11502958801199828,
+      "n": 70,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "omer_2_23_26_handclench_real_data.npy",
+      "model": "csp4_lda",
+      "bal_acc_mean": 0.4914285714285714,
+      "bal_acc_std": 0.11485572138423875,
+      "f1_mean": 0.47807382864813197,
+      "f1_std": 0.11719964427954226,
+      "n": 70,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "omer_2_23_26_handclench_real_data.npy",
+      "model": "csp6_lda",
+      "bal_acc_mean": 0.6,
+      "bal_acc_std": 0.14427864197660112,
+      "f1_mean": 0.5867916033055353,
+      "f1_std": 0.15050377893875716,
+      "n": 70,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "omer_2_23_26_handclench_real_data.npy",
+      "model": "fbank_riemann",
+      "bal_acc_mean": 0.6114285714285714,
+      "bal_acc_std": 0.09493284414763514,
+      "f1_mean": 0.6062829229593936,
+      "f1_std": 0.09716811236040339,
+      "n": 70,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "omer_2_23_26_handclench_real_data.npy",
+      "model": "fbank_riemann_wide",
+      "bal_acc_mean": 0.6399999999999999,
+      "bal_acc_std": 0.09142857142857143,
+      "f1_mean": 0.6323567706803,
+      "f1_std": 0.09494814278421532,
+      "n": 70,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "yichen_2_25_26_handclench_real_data.npy",
+      "model": "riemann_lr",
+      "bal_acc_mean": 0.6375,
+      "bal_acc_std": 0.09519716382329885,
+      "f1_mean": 0.6344921466562333,
+      "f1_std": 0.09542568633466118,
+      "n": 80,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "yichen_2_25_26_handclench_real_data.npy",
+      "model": "riemann_lr_C0.1",
+      "bal_acc_mean": 0.6525,
+      "bal_acc_std": 0.09027735042633894,
+      "f1_mean": 0.6484333798296648,
+      "f1_std": 0.0919927714817449,
+      "n": 80,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "yichen_2_25_26_handclench_real_data.npy",
+      "model": "csp4_lda",
+      "bal_acc_mean": 0.6325,
+      "bal_acc_std": 0.10204165815979277,
+      "f1_mean": 0.6264376514438433,
+      "f1_std": 0.10316229034279632,
+      "n": 80,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "yichen_2_25_26_handclench_real_data.npy",
+      "model": "csp6_lda",
+      "bal_acc_mean": 0.6475,
+      "bal_acc_std": 0.1144006118864755,
+      "f1_mean": 0.6391834584404245,
+      "f1_std": 0.12017911981080814,
+      "n": 80,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "yichen_2_25_26_handclench_real_data.npy",
+      "model": "fbank_riemann",
+      "bal_acc_mean": 0.6125,
+      "bal_acc_std": 0.10897247358851683,
+      "f1_mean": 0.6079019872456405,
+      "f1_std": 0.1124342671076441,
+      "n": 80,
+      "channels": 7,
+      "samples": 600
+    },
+    {
+      "dataset": "yichen_2_25_26_handclench_real_data.npy",
+      "model": "fbank_riemann_wide",
+      "bal_acc_mean": 0.5925,
+      "bal_acc_std": 0.10770329614269009,
+      "f1_mean": 0.5843405449040123,
+      "f1_std": 0.1151636871831302,
+      "n": 80,
+      "channels": 7,
+      "samples": 600
+    }
+  ],
+  "aggregate_bal_acc_mean": [
+    {
+      "model": "riemann_lr_C0.1",
+      "mean_bal_acc": 0.5637294372294372,
+      "datasets": 5
+    },
+    {
+      "model": "riemann_lr",
+      "mean_bal_acc": 0.5527554112554112,
+      "datasets": 5
+    },
+    {
+      "model": "csp6_lda",
+      "mean_bal_acc": 0.5487424242424243,
+      "datasets": 5
+    },
+    {
+      "model": "fbank_riemann_wide",
+      "mean_bal_acc": 0.5415000000000001,
+      "datasets": 5
+    },
+    {
+      "model": "fbank_riemann",
+      "mean_bal_acc": 0.5401796536796537,
+      "datasets": 5
+    },
+    {
+      "model": "csp4_lda",
+      "mean_bal_acc": 0.5237554112554113,
+      "datasets": 5
+    }
+  ]
+}
