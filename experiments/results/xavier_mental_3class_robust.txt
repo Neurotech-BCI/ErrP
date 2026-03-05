@@ -1,0 +1,61 @@
+Loaded X=(540, 7, 300), y=(540,), labels=[10, 11, 12], neutral=10
+Using grouped CV folds=7
+
+=== Three-class OOF ===
+single-stage riemann: bal_acc=0.4148, coverage=1.000, utility=0.4148
+single-stage + robust preproc: bal_acc=0.4352, coverage=1.000, utility=0.4352
+
+=== Confidence threshold (single-stage) ===
+thr=0.34: bal_acc=0.4352, coverage=1.000, utility=0.4352
+thr=0.38: bal_acc=0.4341, coverage=0.985, utility=0.4276
+thr=0.42: bal_acc=0.4434, coverage=0.937, utility=0.4155
+thr=0.46: bal_acc=0.4571, coverage=0.867, utility=0.3961
+thr=0.50: bal_acc=0.4597, coverage=0.796, utility=0.3661
+thr=0.54: bal_acc=0.4604, coverage=0.707, utility=0.3257
+thr=0.58: bal_acc=0.4558, coverage=0.607, utility=0.2768
+thr=0.62: bal_acc=0.4531, coverage=0.531, utility=0.2408
+thr=0.66: bal_acc=0.4672, coverage=0.467, utility=0.2180
+thr=0.70: bal_acc=0.4813, coverage=0.417, utility=0.2005
+thr=0.74: bal_acc=0.4915, coverage=0.339, utility=0.1666
+thr=0.78: bal_acc=0.4996, coverage=0.261, utility=0.1304
+thr=0.82: bal_acc=0.5079, coverage=0.194, utility=0.0988
+thr=0.86: bal_acc=0.5326, coverage=0.163, utility=0.0868
+thr=0.90: bal_acc=0.5901, coverage=0.113, utility=0.0667
+
+=== Two-stage gate (active/rest -> left/right) ===
+gate=0.40, lr=0.45: bal_acc=0.4389, coverage=1.000, utility=0.4389
+gate=0.40, lr=0.50: bal_acc=0.4389, coverage=1.000, utility=0.4389
+gate=0.40, lr=0.55: bal_acc=0.4407, coverage=1.000, utility=0.4407
+gate=0.40, lr=0.60: bal_acc=0.4500, coverage=1.000, utility=0.4500
+gate=0.40, lr=0.65: bal_acc=0.4463, coverage=1.000, utility=0.4463
+gate=0.45, lr=0.45: bal_acc=0.4444, coverage=1.000, utility=0.4444
+gate=0.45, lr=0.50: bal_acc=0.4444, coverage=1.000, utility=0.4444
+gate=0.45, lr=0.55: bal_acc=0.4463, coverage=1.000, utility=0.4463
+gate=0.45, lr=0.60: bal_acc=0.4556, coverage=1.000, utility=0.4556
+gate=0.45, lr=0.65: bal_acc=0.4537, coverage=1.000, utility=0.4537
+gate=0.50, lr=0.45: bal_acc=0.4444, coverage=1.000, utility=0.4444
+gate=0.50, lr=0.50: bal_acc=0.4444, coverage=1.000, utility=0.4444
+gate=0.50, lr=0.55: bal_acc=0.4444, coverage=1.000, utility=0.4444
+gate=0.50, lr=0.60: bal_acc=0.4537, coverage=1.000, utility=0.4537
+gate=0.50, lr=0.65: bal_acc=0.4500, coverage=1.000, utility=0.4500
+gate=0.55, lr=0.45: bal_acc=0.4500, coverage=1.000, utility=0.4500
+gate=0.55, lr=0.50: bal_acc=0.4500, coverage=1.000, utility=0.4500
+gate=0.55, lr=0.55: bal_acc=0.4481, coverage=1.000, utility=0.4481
+gate=0.55, lr=0.60: bal_acc=0.4556, coverage=1.000, utility=0.4556
+gate=0.55, lr=0.65: bal_acc=0.4519, coverage=1.000, utility=0.4519
+gate=0.60, lr=0.45: bal_acc=0.4389, coverage=1.000, utility=0.4389
+gate=0.60, lr=0.50: bal_acc=0.4389, coverage=1.000, utility=0.4389
+gate=0.60, lr=0.55: bal_acc=0.4352, coverage=1.000, utility=0.4352
+gate=0.60, lr=0.60: bal_acc=0.4444, coverage=1.000, utility=0.4444
+gate=0.60, lr=0.65: bal_acc=0.4407, coverage=1.000, utility=0.4407
+
+=== Temporal smoothing on best two-stage ===
+window=1: bal_acc=0.4556, coverage=1.000, utility=0.4556
+window=3: bal_acc=0.4778, coverage=1.000, utility=0.4778
+window=5: bal_acc=0.4778, coverage=1.000, utility=0.4778
+window=7: bal_acc=0.4759, coverage=1.000, utility=0.4759
+
+=== Recommended operating points ===
+single-stage+abstain: thr=0.34, bal_acc=0.4352, coverage=1.000, utility=0.4352
+two-stage: gate=0.45, lr=0.60, bal_acc=0.4556, coverage=1.000, utility=0.4556
+two-stage+smooth: window=3, bal_acc=0.4778, coverage=1.000, utility=0.4778
