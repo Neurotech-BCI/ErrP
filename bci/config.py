@@ -125,11 +125,11 @@ class MentalCommandTaskConfig:
     # Emotiv Mental Command training uses ~8 second training blocks.
     register_duration_s: float = 8.0
     rest_duration_s: float = 3.0
-    prep_duration_s: float = 1.5
+    prep_duration_s: float = 3.0
 
     # Number of calibration cycles.
     # Each cycle records: Neutral -> Command1 -> Command2.
-    n_register_blocks: int = 6
+    n_register_blocks: int = 10
 
     # Sliding-window extraction from registration blocks.
     train_window_s: float = 2.0
