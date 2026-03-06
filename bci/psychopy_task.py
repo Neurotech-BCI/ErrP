@@ -31,7 +31,6 @@ from bci_worker import (
     run_cv,
     filter_epoch,
     RawCSVRecorder,
-    _make_fb_pipeline,
 )
 
 
@@ -413,7 +412,7 @@ def run_task(fname: str):
         # ==============================================================
         # TRAINING
         # ==============================================================
-        cue_text.text = "Training classifiers...\nComparing FB Riemannian vs Log Band Power."
+        cue_text.text = "Training classifier...\nUsing Filter-Bank Riemannian features."
         status_text.text = ""
         draw_scene()
         win.flip()
@@ -424,10 +423,8 @@ def run_task(fname: str):
             )
             cue_text.text = (
                 f"Calibration Complete!\n\n"
-                f"FB Riemannian CV: {cal_result.fb_cv_mean:.1%}\n"
-                f"Log Band Power CV: {cal_result.bp_cv_mean:.1%}\n"
-                f"Selected: {cal_result.chosen_name} "
-                f"({cal_result.cv_mean:.1%} +/- {cal_result.cv_std:.1%})\n"
+                f"Filter-Bank Riemannian CV: "
+                f"{cal_result.cv_mean:.1%} +/- {cal_result.cv_std:.1%}\n"
                 f"Epochs: {len(y_cal)} "
                 f"(L={cal_result.n_per_class.get(str(LEFT), 0)}, "
                 f"R={cal_result.n_per_class.get(str(RIGHT), 0)})\n\n"
@@ -587,7 +584,7 @@ def run_task(fname: str):
                     X_save, y_save, cal_result.full_pipeline,
                 )
                 if len(cv_scores) > 0:
-                    print(f"\nFinal CV ({cal_result.chosen_name}): {cv_mean:.3f} +/- {cv_std:.3f}")
+                    print(f"\nFinal CV (Filter-Bank Riemannian): {cv_mean:.3f} +/- {cv_std:.3f}")
 
         trig.close()
         for resource in [epochs_online, stream]:

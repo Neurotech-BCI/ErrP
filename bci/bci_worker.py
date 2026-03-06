@@ -11,14 +11,13 @@ from pathlib import Path
 
 import numpy as np
 from mne.filter import filter_data, notch_filter
-from sklearn.base import clone
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.covariance import oas
 
-from mental_command_worker import FilterBankTangentSpace, LogBandPowerFeatures
+from mental_command_worker import FilterBankTangentSpace
 from config import EEGConfig, ModelConfig
 
 
@@ -168,24 +167,6 @@ def _make_fb_pipeline(model_cfg: ModelConfig, sfreq: float) -> Pipeline:
     ])
 
 
-def _make_bp_pipeline(model_cfg: ModelConfig, sfreq: float) -> Pipeline:
-    """Log Band Power pipeline for CV evaluation."""
-    return Pipeline([
-        ("bp", LogBandPowerFeatures(
-            bands=model_cfg.filter_bank_bands,
-            sfreq=sfreq,
-        )),
-        ("scaler", StandardScaler()),
-        ("clf", LogisticRegression(
-            C=float(model_cfg.C),
-            solver="lbfgs",
-            max_iter=int(model_cfg.max_iter),
-            class_weight=model_cfg.class_weight,
-            random_state=42,
-        )),
-    ])
-
-
 # ----------------------------------------------------------------
 # Cross-validation helper
 # ----------------------------------------------------------------
@@ -223,11 +204,8 @@ class CalibrationResult:
     feature_extractor: Pipeline   # Frozen pipeline[:-1] for online feature extraction.
     gmm: IncrementalGMM           # Online classifier with incremental updates.
     full_pipeline: Pipeline       # Full fitted pipeline (for final CV).
-    chosen_name: str
     cv_mean: float
     cv_std: float
-    fb_cv_mean: float
-    bp_cv_mean: float
     n_per_class: dict[str, int]
 
 
@@ -239,8 +217,7 @@ def train_initial_classifier(
     left_code: int,
     right_code: int,
 ) -> CalibrationResult:
-    """Compare FB Riemannian and Band Power via CV, fit the winner,
-    then initialise an IncrementalGMM on the calibration features."""
+    """Fit FB Riemannian pipeline, then initialise IncrementalGMM on features."""
     if len(y_cal) == 0:
         raise ValueError("No calibration epochs collected")
 
@@ -248,21 +225,11 @@ def train_initial_classifier(
     y_arr = np.array(y_cal, dtype=int)
 
     fb_pipe = _make_fb_pipeline(model_cfg, sfreq)
-    bp_pipe = _make_bp_pipeline(model_cfg, sfreq)
 
     print("[TRAIN] Evaluating Filter-Bank Riemannian...")
     fb_mean, fb_std, _ = run_cv(X_arr, y_arr, fb_pipe)
-    print("[TRAIN] Evaluating Log Band Power...")
-    bp_mean, bp_std, _ = run_cv(X_arr, y_arr, bp_pipe)
-
-    if fb_mean >= bp_mean:
-        chosen_name = "Filter-Bank Riemannian"
-        chosen_pipe = fb_pipe
-        cv_mean, cv_std = fb_mean, fb_std
-    else:
-        chosen_name = "Log Band Power"
-        chosen_pipe = bp_pipe
-        cv_mean, cv_std = bp_mean, bp_std
+    chosen_pipe = fb_pipe
+    cv_mean, cv_std = fb_mean, fb_std
 
     # Fit chosen pipeline on all calibration data.
     chosen_pipe.fit(X_arr, y_arr)
@@ -284,7 +251,7 @@ def train_initial_classifier(
     }
 
     print(
-        f"[TRAIN] Selected {chosen_name} ({cv_mean:.1%}).  "
+        f"[TRAIN] Selected Filter-Bank Riemannian ({cv_mean:.1%}).  "
         f"GMM fitted on {X_features.shape[1]}-dim features."
     )
 
@@ -292,11 +259,8 @@ def train_initial_classifier(
         feature_extractor=feature_extractor,
         gmm=gmm,
         full_pipeline=chosen_pipe,
-        chosen_name=chosen_name,
         cv_mean=cv_mean,
         cv_std=cv_std,
-        fb_cv_mean=fb_mean,
-        bp_cv_mean=bp_mean,
         n_per_class=n_per_class,
     )
 
