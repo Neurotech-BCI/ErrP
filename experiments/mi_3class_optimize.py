@@ -4,6 +4,7 @@
 Approach: hierarchical two-stage decoder with filter-bank Riemannian features,
 robust preprocessing, confidence thresholding, and causal smoothing.
 """
+import argparse
 import glob, json, os
 import numpy as np
 from mne.filter import filter_data
@@ -146,33 +147,49 @@ def run_dataset(name, X, y, neutral, sfreq=300.0):
     return results
 
 
+def parse_args():
+    ap = argparse.ArgumentParser(description="3-class MI optimization experiments")
+    ap.add_argument("--windows", default="", help="Optional single windows .npy to evaluate")
+    ap.add_argument("--labels", default="", help="Optional labels .npy (required when --windows is set)")
+    ap.add_argument("--out-json", default="experiments/results/mi_3class_optimize.json", help="Output json path")
+    return ap.parse_args()
+
+
 def main():
+    args = parse_args()
+
     pairs = []
-    for d in sorted(glob.glob("data/drive_dump/BCI/*_data.npy") +
-                    glob.glob("data/xavier_2026-03-03/*_windows.npy")):
-        l = d.replace("_data.npy","_labels.npy").replace("_windows.npy","_labels.npy")
-        if os.path.exists(l):
-            pairs.append((d, l))
+    if args.windows:
+        if not args.labels:
+            raise ValueError("--labels is required when --windows is provided")
+        pairs.append((args.windows, args.labels))
+    else:
+        for d in sorted(glob.glob("data/drive_dump/BCI/*_data.npy") +
+                        glob.glob("data/xavier_2026-03-03/*_windows.npy")):
+            l = d.replace("_data.npy","_labels.npy").replace("_windows.npy","_labels.npy")
+            if os.path.exists(l):
+                pairs.append((d, l))
 
     all_results = {}
     for d, l in pairs:
         name = os.path.basename(d)
         X = np.load(d).astype(np.float32)
         y = np.load(l).astype(int)
-        if X.ndim != 3: continue
+        if X.ndim != 3:
+            continue
         classes = np.unique(y)
         if len(classes) < 3:
             print(f"\n{name}: only {classes} – binary only, skipping 3-class")
             continue
         neutral = int(classes[0])  # assume smallest code = neutral/rest
         r = run_dataset(name, X, y, neutral)
-        if r: all_results[name] = r
+        if r:
+            all_results[name] = r
 
-    out_path = "experiments/results/mi_3class_optimize.json"
-    os.makedirs("experiments/results", exist_ok=True)
-    with open(out_path, "w") as f:
+    os.makedirs(os.path.dirname(args.out_json) or ".", exist_ok=True)
+    with open(args.out_json, "w") as f:
         json.dump(all_results, f, indent=2)
-    print(f"\nSaved: {out_path}")
+    print(f"\nSaved: {args.out_json}")
 
 
 if __name__ == "__main__":

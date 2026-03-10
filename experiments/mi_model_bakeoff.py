@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, asdict
 from typing import Callable
 
 import numpy as np
@@ -127,11 +128,18 @@ def main():
     ap.add_argument("--labels", required=True)
     ap.add_argument("--sfreq", type=float, default=300.0)
     ap.add_argument("--windows-per-block", type=int, default=29)
+    ap.add_argument("--block-ids", default="", help="Optional .npy block ids (same length as labels)")
+    ap.add_argument("--out-json", default="", help="Optional path to write full results json")
     args = ap.parse_args()
 
     X = np.load(args.windows)
     y = np.load(args.labels).astype(int)
-    block_ids = infer_block_ids(y, windows_per_block=args.windows_per_block)
+    if args.block_ids:
+        block_ids = np.load(args.block_ids).astype(int)
+        if len(block_ids) != len(y):
+            raise ValueError("block_ids length must equal labels length")
+    else:
+        block_ids = infer_block_ids(y, windows_per_block=args.windows_per_block)
 
     print(f"Loaded X={X.shape}, y={y.shape}, classes={np.unique(y).tolist()}")
 
@@ -141,11 +149,28 @@ def main():
         ("FilterBank-Riemann+LR", lambda: FilterBankRiemannLR(args.sfreq, [(8, 12), (12, 16), (16, 20), (20, 28), (8, 30)])),
     ]
 
+    out = {
+        "windows": args.windows,
+        "labels": args.labels,
+        "sfreq": args.sfreq,
+        "n_samples": int(X.shape[0]),
+        "n_channels": int(X.shape[1]),
+        "n_times": int(X.shape[2]),
+        "classes": [int(v) for v in np.unique(y)],
+        "three_class": [],
+        "binary_lr": [],
+        "binary_active_vs_neutral": [],
+    }
+
     print("\n=== 3-class (neutral/left/right) ===")
     for name, maker in models:
         r = evaluate(name, X, y, block_ids, maker)
         print(f"{r.name}: balanced_acc={r.balanced_acc:.4f}, macro_f1={r.macro_f1:.4f}")
         print(r.confusion)
+        out["three_class"].append({
+            **asdict(r),
+            "confusion": r.confusion.tolist(),
+        })
 
     c = np.unique(y)
     if len(c) >= 3:
@@ -159,6 +184,10 @@ def main():
         for name, maker in models:
             r = evaluate(name, X_lr, y_lr, b_lr, maker)
             print(f"{r.name}: balanced_acc={r.balanced_acc:.4f}, macro_f1={r.macro_f1:.4f}")
+            out["binary_lr"].append({
+                **asdict(r),
+                "confusion": r.confusion.tolist(),
+            })
 
         # active vs rest
         y_ar = (y != neutral).astype(int)
@@ -166,6 +195,15 @@ def main():
         for name, maker in models:
             r = evaluate(name, X, y_ar, block_ids, maker)
             print(f"{r.name}: balanced_acc={r.balanced_acc:.4f}, macro_f1={r.macro_f1:.4f}")
+            out["binary_active_vs_neutral"].append({
+                **asdict(r),
+                "confusion": r.confusion.tolist(),
+            })
+
+    if args.out_json:
+        with open(args.out_json, "w", encoding="utf-8") as fh:
+            json.dump(out, fh, indent=2)
+        print(f"\nSaved json report: {args.out_json}")
 
 
 if __name__ == "__main__":
