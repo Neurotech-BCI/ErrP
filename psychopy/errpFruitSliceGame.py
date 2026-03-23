@@ -818,25 +818,26 @@ class FruitSliceErrPGame:
 
     def _draw_zone(self, now: float) -> None:
         pulse = 0.5 + 0.5 * math.sin(now * 4.8)
-        left_alpha = 80
-        right_alpha = 80
+        left_alpha = 90
+        right_alpha = 90
+        left_fill_alpha = 28
+        right_fill_alpha = 28
         if self.current_trial is not None and self.state == "active":
             if self.current_trial.fruit_side == SIDE_LEFT:
-                left_alpha = 130
+                left_alpha = int(180 + 55 * pulse)
+                left_fill_alpha = int(48 + 24 * pulse)
             else:
-                right_alpha = 130
+                right_alpha = int(180 + 55 * pulse)
+                right_fill_alpha = int(48 + 24 * pulse)
 
-        for zone, fill_color, label, label_color, alpha in (
-            (self.left_zone, (46, 220, 166), "LEFT", (220, 245, 236), left_alpha),
-            (self.right_zone, (255, 126, 83), "RIGHT", (255, 232, 226), right_alpha),
+        for zone, fill_color, label, label_color, alpha, fill_alpha in (
+            (self.left_zone, (46, 220, 166), "LEFT", (220, 245, 236), left_alpha, left_fill_alpha),
+            (self.right_zone, (255, 126, 83), "RIGHT", (255, 232, 226), right_alpha, right_fill_alpha),
         ):
-            glow = pygame.Surface((zone.width + 48, zone.height + 48), pygame.SRCALPHA)
-            pygame.draw.rect(glow, (*fill_color, 52), glow.get_rect(), border_radius=30)
-            self.screen.blit(glow, (zone.left - 24, zone.top - 24))
-
             zone_surf = pygame.Surface((zone.width, zone.height), pygame.SRCALPHA)
-            pygame.draw.rect(zone_surf, (10, 26, 44, 150), zone_surf.get_rect(), border_radius=18)
-            pygame.draw.rect(zone_surf, (*fill_color, alpha), zone_surf.get_rect(), width=3, border_radius=18)
+            pygame.draw.rect(zone_surf, (10, 26, 44, 160), zone_surf.get_rect(), border_radius=18)
+            pygame.draw.rect(zone_surf, (*fill_color, fill_alpha), zone_surf.get_rect(), border_radius=18)
+            pygame.draw.rect(zone_surf, (*fill_color, alpha), zone_surf.get_rect(), width=4, border_radius=18)
             self.screen.blit(zone_surf, zone)
             self._draw_text(label, self.font_small, label_color, zone.centerx, zone.top + 12, anchor="midtop")
 
