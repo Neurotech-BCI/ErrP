@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
+import mne
 import numpy as np
 from pyriemann.estimation import Covariances
 from pyriemann.tangentspace import TangentSpace
 from scipy.signal import butter, iirnotch, sosfilt, sosfilt_zi, tf2sos
 from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix, f1_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from config import EEGConfig, MentalCommandModelConfig
+from config import EEGConfig, MentalCommandModelConfig, MentalCommandTaskConfig, StimConfig
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +126,213 @@ def split_windows(
     for i, s in enumerate(starts):
         out[i] = block[:, s : s + w]
     return out
+
+
+# ---------------------------------------------------------------------------
+# EDF-backed MI training data
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OfflineMIDataset:
+    X: np.ndarray
+    y: np.ndarray
+    sfreq: float
+    channel_names: list[str]
+    n_files_found: int
+    n_files_used: int
+    n_trials: int
+    n_windows: int
+
+
+def canonicalize_channel_name(name: str) -> str:
+    cleaned = str(name).strip()
+    cleaned = cleaned.replace("EEG ", "")
+    cleaned = cleaned.replace("EEG_", "")
+    cleaned = cleaned.replace("-Pz", "")
+    cleaned = cleaned.replace("-PZ", "")
+    cleaned = cleaned.replace(" ", "")
+    return cleaned.upper()
+
+
+def resolve_channel_order(
+    available_names: list[str] | tuple[str, ...],
+    desired_names: list[str] | tuple[str, ...],
+) -> tuple[list[str], list[str]]:
+    actual_by_key: dict[str, str] = {}
+    for name in available_names:
+        key = canonicalize_channel_name(name)
+        if key not in actual_by_key:
+            actual_by_key[key] = str(name)
+
+    resolved: list[str] = []
+    missing: list[str] = []
+    for desired in desired_names:
+        key = canonicalize_channel_name(desired)
+        actual = actual_by_key.get(key)
+        if actual is None:
+            missing.append(str(desired))
+        else:
+            resolved.append(actual)
+    return resolved, missing
+
+
+def _standardize_edf_channels(raw: mne.io.BaseRaw) -> mne.io.BaseRaw:
+    if "EEG LE-Pz" in raw.ch_names:
+        raw.set_eeg_reference(ref_channels=["EEG LE-Pz"], verbose="ERROR")
+
+    rename_map: dict[str, str] = {}
+    for ch_name in raw.ch_names:
+        new_name = ch_name
+        if "-Pz" in new_name:
+            new_name = new_name.replace("-Pz", "")
+        elif "-PZ" in new_name:
+            new_name = new_name.replace("-PZ", "")
+        if new_name == "Pz":
+            new_name = "EEG Pz"
+        if new_name != ch_name:
+            rename_map[ch_name] = new_name
+
+    if rename_map:
+        raw.rename_channels(rename_map)
+    return raw
+
+
+def _find_stim_channel(raw: mne.io.BaseRaw) -> str:
+    candidates = (
+        "Trigger",
+        "TRG",
+        "TRIGGER",
+        "trigger",
+        "STI",
+        "stim",
+        "Status",
+        "status",
+    )
+    available = list(raw.ch_names)
+    for candidate in candidates:
+        if candidate in available:
+            return candidate
+
+    by_key = {canonicalize_channel_name(name): name for name in available}
+    for candidate in candidates:
+        actual = by_key.get(canonicalize_channel_name(candidate))
+        if actual is not None:
+            return actual
+
+    raise RuntimeError(
+        "Could not find a trigger/stim channel in EDF. "
+        f"Available channels: {available}"
+    )
+
+
+def load_offline_mi_dataset(
+    data_dir: str,
+    edf_glob: str,
+    eeg_cfg: EEGConfig,
+    task_cfg: MentalCommandTaskConfig,
+    stim_cfg: StimConfig,
+    target_sfreq: float,
+    target_channel_names: list[str] | tuple[str, ...],
+) -> OfflineMIDataset:
+    data_path = Path(data_dir).expanduser()
+    edf_paths = sorted(data_path.rglob(edf_glob))
+    if not edf_paths:
+        raise FileNotFoundError(
+            f"No EDF files matched {edf_glob!r} under {str(data_path)!r}"
+        )
+
+    context_n = int(round(float(task_cfg.filter_context_s) * float(target_sfreq)))
+    epoch_n = int(round(float(task_cfg.epoch_duration_s) * float(target_sfreq)))
+    reject_thresh = eeg_cfg.reject_peak_to_peak
+
+    all_windows: list[np.ndarray] = []
+    all_labels: list[np.ndarray] = []
+    n_trials = 0
+    n_files_used = 0
+
+    for edf_path in edf_paths:
+        raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
+        raw = _standardize_edf_channels(raw)
+        stim_channel = _find_stim_channel(raw)
+
+        events = mne.find_events(
+            raw,
+            stim_channel=stim_channel,
+            min_duration=0.0,
+            verbose=False,
+        )
+        if len(events) == 0:
+            continue
+
+        original_sfreq = float(raw.info["sfreq"])
+        event_times_s = events[:, 0].astype(np.float64) / original_sfreq
+
+        if abs(original_sfreq - float(target_sfreq)) > 1e-6:
+            raw.resample(float(target_sfreq), npad="auto", verbose="ERROR")
+
+        picks, missing = resolve_channel_order(raw.ch_names, target_channel_names)
+        if missing:
+            raise RuntimeError(
+                f"EDF {edf_path} is missing required channels {missing}. "
+                f"Available channels: {raw.ch_names}"
+            )
+
+        eeg_data = raw.get_data(picks=picks).astype(np.float32, copy=False)
+        file_used = False
+
+        for event_time_s, event_code in zip(event_times_s, events[:, 2]):
+            if not stim_cfg.is_lr_code(int(event_code)):
+                continue
+
+            start = int(round((float(event_time_s) - float(task_cfg.filter_context_s)) * float(target_sfreq)))
+            stop = start + context_n + epoch_n
+            if start < 0 or stop > eeg_data.shape[1]:
+                continue
+
+            segment = eeg_data[:, start:stop]
+            filtered_segment = filter_block(segment, eeg_cfg=eeg_cfg, sfreq=float(target_sfreq))
+            trial = filtered_segment[:, context_n: context_n + epoch_n]
+            windows = split_windows(
+                block=trial,
+                sfreq=float(target_sfreq),
+                window_s=float(task_cfg.train_window_s),
+                step_s=float(task_cfg.train_window_step_s),
+            )
+            if windows.shape[0] == 0:
+                continue
+
+            if reject_thresh is not None:
+                keep_mask = np.ptp(windows, axis=-1).max(axis=1) <= float(reject_thresh)
+                windows = windows[keep_mask]
+            if windows.shape[0] == 0:
+                continue
+
+            all_windows.append(windows)
+            all_labels.append(np.full(windows.shape[0], int(event_code), dtype=int))
+            n_trials += 1
+            file_used = True
+
+        if file_used:
+            n_files_used += 1
+
+    if not all_windows:
+        raise RuntimeError(
+            "No usable left/right training windows were extracted from the EDF folder. "
+            "Check the data path, trigger codes, and channel alignment."
+        )
+
+    X = np.concatenate(all_windows, axis=0).astype(np.float32, copy=False)
+    y = np.concatenate(all_labels, axis=0).astype(int, copy=False)
+    return OfflineMIDataset(
+        X=X,
+        y=y,
+        sfreq=float(target_sfreq),
+        channel_names=[str(name) for name in target_channel_names],
+        n_files_found=len(edf_paths),
+        n_files_used=n_files_used,
+        n_trials=n_trials,
+        n_windows=int(X.shape[0]),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +449,16 @@ def make_bandpower_classifier(
         )),
         ("scaler", StandardScaler()),
         ("clf", _make_lr(model_cfg)),
+    ])
+
+
+def make_mi_classifier(model_cfg: MentalCommandModelConfig) -> Pipeline:
+    """Single-band Riemannian classifier for left/right motor imagery windows."""
+    return Pipeline([
+        ("cov", Covariances(estimator=model_cfg.cov_estimator)),
+        ("ts", TangentSpace(metric="riemann")),
+        ("scaler", StandardScaler()),
+        ("clf", LinearDiscriminantAnalysis()),
     ])
 
 

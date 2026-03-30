@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -109,39 +110,31 @@ class SessionConfig:
 
 @dataclass(frozen=True)
 class MentalCommandLabelConfig:
-    neutral_code: int = 10
-    command1_code: int = 11
-    command2_code: int = 12
-
-    command1_name: str = "LEFT"
-    command2_name: str = "RIGHT"
-
-    def all_codes(self) -> tuple[int, int, int]:
-        return (self.neutral_code, self.command1_code, self.command2_code)
+    left_name: str = "LEFT"
+    right_name: str = "RIGHT"
 
 
 @dataclass(frozen=True)
 class MentalCommandTaskConfig:
-    # Emotiv Mental Command training uses ~8 second training blocks.
-    register_duration_s: float = 8.0
-    rest_duration_s: float = 3.0
-    prep_duration_s: float = 3.0
+    # Folder of cued MI EDF sessions used to fit the live model at startup.
+    data_dir: str = ""
+    edf_glob: str = "*.edf"
 
-    # Number of calibration cycles.
-    # Each cycle records: Neutral -> Command1 -> Command2.
-    n_register_blocks: int = 10
+    # Each cued MI execution epoch is 3 seconds long in the offline task.
+    epoch_duration_s: float = 3.0
 
-    # Sliding-window extraction from registration blocks.
-    train_window_s: float = 2.0
-    train_window_step_s: float = 0.5
+    # Sliding-window extraction used for both offline training and live decoding.
+    train_window_s: float = 1.0
+    train_window_step_s: float = 0.25
 
-    # Extra seconds of context to fetch before the live window for clean filtering.
-    live_filter_context_s: float = 2.0
+    # Extra pre-onset context included before each training epoch and retained
+    # in the live ring buffer so causal filtering behaves consistently.
+    filter_context_s: float = 2.0
 
     # Continuous live feedback settings.
     live_update_interval_s: float = 0.10
     live_display_smoothing_alpha: float = 0.25
-    min_confidence_to_show: float = 0.20
+    live_deadband: float = 0.10
 
     # Visualization runtime.
     live_duration_s: float = 180.0
@@ -149,18 +142,13 @@ class MentalCommandTaskConfig:
 
 @dataclass(frozen=True)
 class MentalCommandModelConfig:
-    # Shared logistic regression hyperparameters for both pipelines.
     C: float = 1.0
     max_iter: int = 1500
     class_weight: str | None = "balanced"
-
-    # Minimum windows per class required before LOGO-by-block-triplet CV.
-    min_per_class_for_cv: int = 4
-
-    # Filter-bank sub-band definitions (lo_hz, hi_hz).
     filter_bank_bands: tuple[tuple[float, float], ...] = (
-        (4.0, 8.0),    # theta
-        (8.0, 13.0),   # alpha
-        (13.0, 30.0),  # beta
-        (30.0, 45.0),  # low-gamma
+        (4.0, 8.0),
+        (8.0, 13.0),
+        (13.0, 30.0),
+        (30.0, 45.0),
     )
+    cov_estimator: str = "oas"
