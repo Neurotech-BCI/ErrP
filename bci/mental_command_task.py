@@ -43,6 +43,37 @@ def _make_task_logger(fname: str) -> logging.Logger:
     return logger
 
 
+def _channel_stat_map(channel_names: list[str], values: np.ndarray, precision: int = 3) -> dict[str, float]:
+    return {
+        str(ch): round(float(val), precision)
+        for ch, val in zip(channel_names, np.asarray(values).tolist())
+    }
+
+
+def _top_channel_deviation_summary(
+    channel_names: list[str],
+    current_values: np.ndarray,
+    ref_means: np.ndarray,
+    ref_stds: np.ndarray,
+    top_k: int = 3,
+) -> list[dict[str, float | str]]:
+    current_values = np.asarray(current_values, dtype=np.float64)
+    ref_means = np.asarray(ref_means, dtype=np.float64)
+    ref_stds = np.asarray(ref_stds, dtype=np.float64)
+    z = np.abs((current_values - ref_means) / np.maximum(ref_stds, 1e-6))
+    top_idx = np.argsort(z)[-int(top_k):][::-1]
+    summary: list[dict[str, float | str]] = []
+    for idx in top_idx:
+        summary.append({
+            "channel": str(channel_names[int(idx)]),
+            "value": round(float(current_values[int(idx)]), 3),
+            "train_mean": round(float(ref_means[int(idx)]), 3),
+            "train_std": round(float(ref_stds[int(idx)]), 3),
+            "abs_z": round(float(z[int(idx)]), 3),
+        })
+    return summary
+
+
 def run_task(fname: str):
     logger = _make_task_logger(fname)
     lsl_cfg = LSLConfig()
@@ -166,6 +197,14 @@ def run_task(fname: str):
     classifier = None
     class_index = None
     classifier_classes = None
+    feature_extractor = None
+    train_feature_mean = None
+    train_feature_std = None
+    train_feature_centroids = None
+    train_ch_std_mean = None
+    train_ch_std_std = None
+    train_ch_ptp_mean = None
+    train_ch_ptp_std = None
     dataset = None
     reject_thresh = eeg_cfg.reject_peak_to_peak
     window_n = int(round(task_cfg.window_s * sfreq))
@@ -213,6 +252,7 @@ def run_task(fname: str):
         classifier = make_mi_classifier(model_cfg)
         classifier.fit(dataset.X, dataset.y)
         classifier_classes = np.asarray(classifier.named_steps["clf"].classes_, dtype=int)
+        feature_extractor = classifier[:-1]
         class_index = {int(c): i for i, c in enumerate(classifier_classes)}
         if int(stim_cfg.left_code) not in class_index or int(stim_cfg.right_code) not in class_index:
             raise RuntimeError(
@@ -220,6 +260,19 @@ def run_task(fname: str):
                 f"left/right codes {[int(stim_cfg.left_code), int(stim_cfg.right_code)]}."
             )
         counts = Counter(dataset.y.tolist())
+        train_features = np.asarray(feature_extractor.transform(dataset.X), dtype=np.float64)
+        train_feature_mean = np.mean(train_features, axis=0)
+        train_feature_std = np.std(train_features, axis=0)
+        train_feature_centroids = {
+            int(code): np.mean(train_features[dataset.y == int(code)], axis=0)
+            for code in classifier_classes.tolist()
+        }
+        train_ch_std = np.std(dataset.X, axis=2)
+        train_ch_ptp = np.ptp(dataset.X, axis=2)
+        train_ch_std_mean = np.mean(train_ch_std, axis=0)
+        train_ch_std_std = np.std(train_ch_std, axis=0)
+        train_ch_ptp_mean = np.mean(train_ch_ptp, axis=0)
+        train_ch_ptp_std = np.std(train_ch_ptp, axis=0)
         logger.info(
             "Offline dataset ready: files_used=%d/%d, trials=%d, windows=%d, class_counts=%s, "
             "loso_mean=%.4f, loso_std=%.4f",
@@ -248,6 +301,22 @@ def run_task(fname: str):
             train_acc,
             train_pred_counts,
         )
+        logger.info(
+            "Offline channel diagnostics: std_mean_by_channel=%s, ptp_mean_by_channel=%s",
+            _channel_stat_map(model_ch_names, train_ch_std_mean),
+            _channel_stat_map(model_ch_names, train_ch_ptp_mean),
+        )
+        for code in classifier_classes.tolist():
+            class_mask = dataset.y == int(code)
+            if np.any(class_mask):
+                class_ch_std_mean = np.mean(train_ch_std[class_mask], axis=0)
+                class_ch_ptp_mean = np.mean(train_ch_ptp[class_mask], axis=0)
+                logger.info(
+                    "Offline channel diagnostics by class: code=%d, std_mean_by_channel=%s, ptp_mean_by_channel=%s",
+                    int(code),
+                    _channel_stat_map(model_ch_names, class_ch_std_mean),
+                    _channel_stat_map(model_ch_names, class_ch_ptp_mean),
+                )
         for code in classifier_classes.tolist():
             class_mask = dataset.y == int(code)
             if np.any(class_mask):
@@ -263,12 +332,33 @@ def run_task(fname: str):
                     int(np.sum(class_mask)),
                     prob_map,
                 )
+                centroid_norm = float(np.linalg.norm(train_feature_centroids[int(code)]))
+                logger.info(
+                    "Offline feature centroid: code=%d, centroid_l2_norm=%.3f",
+                    int(code),
+                    centroid_norm,
+                )
         for session_id, score in sorted(loso.session_scores.items()):
             logger.info("LOSO session result: session=%d accuracy=%.4f", session_id, score)
         np.save(f"{fname}_mi_visualizer_windows.npy", dataset.X)
         np.save(f"{fname}_mi_visualizer_labels.npy", dataset.y)
         with open(f"{fname}_mi_visualizer_model.pkl", "wb") as fh:
             pickle.dump(classifier, fh)
+        with open(f"{fname}_mi_visualizer_diagnostics.pkl", "wb") as fh:
+            pickle.dump(
+                {
+                    "channel_names": list(model_ch_names),
+                    "classifier_classes": classifier_classes.tolist(),
+                    "train_feature_mean": train_feature_mean,
+                    "train_feature_std": train_feature_std,
+                    "train_feature_centroids": train_feature_centroids,
+                    "train_ch_std_mean": train_ch_std_mean,
+                    "train_ch_std_std": train_ch_std_std,
+                    "train_ch_ptp_mean": train_ch_ptp_mean,
+                    "train_ch_ptp_std": train_ch_ptp_std,
+                },
+                fh,
+            )
 
         session_lines = []
         for session_id, score in sorted(loso.session_scores.items()):
@@ -312,6 +402,9 @@ def run_task(fname: str):
         samples_since_last_decode = 0
         last_decoded_sample_total = -1
         last_decoded_end_ts: float | None = None
+        accepted_feature_zscores: list[float] = []
+        accepted_right_probs: list[float] = []
+        accepted_left_probs: list[float] = []
 
         live_filter = StreamingIIRFilter.from_eeg_config(
             eeg_cfg=eeg_cfg,
@@ -387,20 +480,47 @@ def run_task(fname: str):
                     window_mean = float(np.mean(x_win))
                     window_std = float(np.std(x_win))
                     window_ptp = float(np.ptp(x_win, axis=-1).max())
+                    window_ch_std = np.std(x_win, axis=1)
+                    window_ch_ptp = np.ptp(x_win, axis=1)
                     is_fresh_window = samples_since_last_decode > 0
                     decode_end_ts = last_live_ts
                     if reject_thresh is None or float(np.ptp(x_win, axis=-1).max()) <= float(reject_thresh):
+                        x_feat = np.asarray(feature_extractor.transform(x_win[np.newaxis, ...])[0], dtype=np.float64)
                         p_vec = classifier.predict_proba(x_win[np.newaxis, ...])[0]
                         pred_code = int(classifier.predict(x_win[np.newaxis, ...])[0])
+                        decision_raw = float(np.ravel(classifier.decision_function(x_win[np.newaxis, ...]))[0])
                         prob_map = {
                             int(cls): float(p_vec[idx])
                             for idx, cls in enumerate(classifier_classes.tolist())
                         }
+                        feature_abs_z = np.abs((x_feat - train_feature_mean) / np.maximum(train_feature_std, 1e-6))
+                        feature_z_l2 = float(np.sqrt(np.mean(feature_abs_z ** 2)))
+                        centroid_dist_map = {
+                            int(code): float(np.linalg.norm(x_feat - centroid))
+                            for code, centroid in train_feature_centroids.items()
+                        }
+                        ch_std_deviation = _top_channel_deviation_summary(
+                            channel_names=model_ch_names,
+                            current_values=window_ch_std,
+                            ref_means=train_ch_std_mean,
+                            ref_stds=train_ch_std_std,
+                        )
+                        ch_ptp_deviation = _top_channel_deviation_summary(
+                            channel_names=model_ch_names,
+                            current_values=window_ch_ptp,
+                            ref_means=train_ch_ptp_mean,
+                            ref_stds=train_ch_ptp_std,
+                        )
                         prediction_count += 1
                         live_note = "updating"
+                        accepted_feature_zscores.append(feature_z_l2)
+                        accepted_left_probs.append(float(prob_map[int(stim_cfg.left_code)]))
+                        accepted_right_probs.append(float(prob_map[int(stim_cfg.right_code)]))
                         logger.info(
                             "Decode %d: fresh_window=%s, new_samples_since_last_decode=%d, total_samples=%d, "
-                            "window_mean=%.3f, window_std=%.3f, window_ptp=%.3f, end_ts=%s, predicted_code=%d, probs_by_code=%s",
+                            "window_mean=%.3f, window_std=%.3f, window_ptp=%.3f, end_ts=%s, predicted_code=%d, "
+                            "decision_raw=%.6f, feature_z_l2=%.3f, probs_by_code=%s, centroid_dists=%s, "
+                            "ch_std_top_deviation=%s, ch_ptp_top_deviation=%s",
                             prediction_count,
                             is_fresh_window,
                             samples_since_last_decode,
@@ -410,7 +530,12 @@ def run_task(fname: str):
                             window_ptp,
                             "None" if decode_end_ts is None else f"{decode_end_ts:.6f}",
                             pred_code,
+                            decision_raw,
+                            feature_z_l2,
                             prob_map,
+                            centroid_dist_map,
+                            ch_std_deviation,
+                            ch_ptp_deviation,
                         )
                         if not is_fresh_window or last_decoded_sample_total == total_samples_appended:
                             logger.warning(
@@ -429,12 +554,13 @@ def run_task(fname: str):
                         live_note = "artifact reject"
                         logger.warning(
                             "Decode skipped by artifact reject: new_samples_since_last_decode=%d, total_samples=%d, "
-                            "window_ptp=%.3f, threshold=%.3f, end_ts=%s",
+                            "window_ptp=%.3f, threshold=%.3f, end_ts=%s, ch_ptp_by_channel=%s",
                             samples_since_last_decode,
                             total_samples_appended,
                             window_ptp,
                             float(reject_thresh),
                             "None" if decode_end_ts is None else f"{decode_end_ts:.6f}",
+                            _channel_stat_map(model_ch_names, window_ch_ptp),
                         )
                 else:
                     needed_s = max(0.0, (keep_n - live_buffer.shape[1]) / sfreq)
@@ -489,6 +615,16 @@ def run_task(fname: str):
         logger.info("Session interrupted by user.")
         print("\nSession interrupted.")
     finally:
+        if classifier is not None and accepted_feature_zscores:
+            logger.info(
+                "Live accepted window summary: n=%d, feature_z_l2_mean=%.3f, feature_z_l2_max=%.3f, "
+                "left_prob_mean=%.6f, right_prob_mean=%.6f",
+                len(accepted_feature_zscores),
+                float(np.mean(accepted_feature_zscores)),
+                float(np.max(accepted_feature_zscores)),
+                float(np.mean(accepted_left_probs)),
+                float(np.mean(accepted_right_probs)),
+            )
         logger.info("Shutting down live session.")
         try:
             stream.disconnect()
