@@ -11,14 +11,12 @@ from mne_lsl.stream import StreamLSL
 
 from config import EEGConfig, LSLConfig, MentalCommandLabelConfig, MentalCommandModelConfig, MentalCommandTaskConfig, StimConfig
 from mental_command_worker import (
-    EMAProbSmoother,
     StreamingIIRFilter,
     canonicalize_channel_name,
+    evaluate_loso_sessions,
     load_offline_mi_dataset,
     make_mi_classifier,
-    rereference_and_select,
     resolve_channel_order,
-    resolve_optional_channel,
 )
 
 
@@ -29,11 +27,10 @@ def run_task(fname: str):
     task_cfg = MentalCommandTaskConfig()
     model_cfg = MentalCommandModelConfig()
     eeg_cfg = EEGConfig(
-        picks=("F4", "C4", "P4", "P3", "C3", "F3", "Pz"),
+        picks=("Pz", "F4", "C4", "P4", "P3", "C3", "F3"),
         l_freq=8.0,
         h_freq=30.0,
         reject_peak_to_peak=150.0,
-        reref_channel="LE",
     )
 
     stream = StreamLSL(
@@ -53,22 +50,12 @@ def run_task(fname: str):
     if len(model_ch_names) < 2:
         raise RuntimeError(f"Need >=2 EEG channels, found: {available}")
 
-    live_ref_name = resolve_optional_channel(available, eeg_cfg.reref_channel)
-    stream_pick_names = list(model_ch_names)
-    if live_ref_name is not None and live_ref_name not in stream_pick_names:
-        stream_pick_names.append(live_ref_name)
-
-    stream.pick(stream_pick_names)
+    stream.pick(model_ch_names)
     sfreq = float(stream.info["sfreq"])
     stream_ch_names = list(stream.info["ch_names"])
     print(f"[LSL] Connected: sfreq={sfreq:.1f} Hz, channels={stream_ch_names}")
     if missing:
         print(f"[LSL] Missing configured channels from live stream: {missing}")
-    if live_ref_name is None and eeg_cfg.reref_channel is not None:
-        print(
-            f"[LSL] Reference channel {eeg_cfg.reref_channel!r} not present in the live stream. "
-            "Training EDFs will be loaded without extra rereferencing to stay aligned with live data."
-        )
 
     win = visual.Window(size=(1280, 760), color=(-0.08, -0.08, -0.08), units="norm", fullscr=False)
     title = visual.TextStim(win, text="Motor Imagery Visualizer", pos=(0, 0.78), height=0.06, color=(0.9, 0.9, 0.9))
@@ -110,34 +97,18 @@ def run_task(fname: str):
         fillColor=(0.95, 0.65, -0.2),
         lineColor=None,
     )
-    left_lbl = visual.TextStim(
-        win,
-        text=label_cfg.left_name,
-        pos=(-0.48, -0.2),
-        height=0.05,
-        color=(0.8, 0.9, 1.0),
-    )
-    right_lbl = visual.TextStim(
-        win,
-        text=label_cfg.right_name,
-        pos=(0.48, -0.2),
-        height=0.05,
-        color=(1.0, 0.9, 0.75),
-    )
+    left_lbl = visual.TextStim(win, text=label_cfg.left_name, pos=(-0.48, -0.2), height=0.05, color=(0.8, 0.9, 1.0))
+    right_lbl = visual.TextStim(win, text=label_cfg.right_name, pos=(0.48, -0.2), height=0.05, color=(1.0, 0.9, 0.75))
 
     def update_bar(score: float):
         score = float(np.clip(score, -1.0, 1.0))
-        max_half = bar_w / 2.0
-        left_mag = max(-score, 0.0)
-        right_mag = max(score, 0.0)
-
-        lw = max_half * left_mag
-        rw = max_half * right_mag
-
-        left_fill.width = max(lw, 0.001)
-        left_fill.pos = (-lw / 2.0, bar_y)
-        right_fill.width = max(rw, 0.001)
-        right_fill.pos = (+rw / 2.0, bar_y)
+        half_width = bar_w / 2.0
+        left_width = half_width * max(-score, 0.0)
+        right_width = half_width * max(score, 0.0)
+        left_fill.width = max(left_width, 0.001)
+        left_fill.pos = (-left_width / 2.0, bar_y)
+        right_fill.width = max(right_width, 0.001)
+        right_fill.pos = (+right_width / 2.0, bar_y)
 
     def draw_frame():
         title.draw()
@@ -152,10 +123,6 @@ def run_task(fname: str):
         status.draw()
         win.flip()
 
-    def poll_escape():
-        if "escape" in event.getKeys():
-            raise KeyboardInterrupt
-
     def wait_for_space():
         while True:
             draw_frame()
@@ -167,16 +134,16 @@ def run_task(fname: str):
 
     classifier = None
     class_index = None
-    smoother = None
     dataset = None
     reject_thresh = eeg_cfg.reject_peak_to_peak
-    w_samples = int(round(task_cfg.train_window_s * sfreq))
+    window_n = int(round(task_cfg.window_s * sfreq))
 
     try:
         cue.text = "Preparing model from offline EDF sessions..."
         status.text = (
             f"Loading data from {task_cfg.data_dir}\n"
-            "This uses the same causal filter and windowing that will be used online."
+            "Offline EDFs are standardized to the live stream convention: left-ear referenced, standard channel names,\n"
+            "then causally filtered and windowed exactly like the live stream."
         )
         detected.text = ""
         update_bar(0.0)
@@ -190,7 +157,6 @@ def run_task(fname: str):
             stim_cfg=stim_cfg,
             target_sfreq=sfreq,
             target_channel_names=model_ch_names,
-            reref_channel_name=live_ref_name,
         )
         classes_present = {int(c) for c in np.unique(dataset.y)}
         expected_classes = {int(stim_cfg.left_code), int(stim_cfg.right_code)}
@@ -199,13 +165,11 @@ def run_task(fname: str):
                 f"Training data must contain both left/right classes. "
                 f"Found {sorted(classes_present)}, expected {sorted(expected_classes)}."
             )
+
+        loso = evaluate_loso_sessions(dataset, model_cfg)
         classifier = make_mi_classifier(model_cfg)
         classifier.fit(dataset.X, dataset.y)
         class_index = {int(c): i for i, c in enumerate(classifier.named_steps["clf"].classes_)}
-        smoother = EMAProbSmoother(
-            alpha=task_cfg.live_display_smoothing_alpha,
-            n_classes=len(classifier.named_steps["clf"].classes_),
-        )
 
         counts = Counter(dataset.y.tolist())
         np.save(f"{fname}_mi_visualizer_windows.npy", dataset.X)
@@ -213,17 +177,24 @@ def run_task(fname: str):
         with open(f"{fname}_mi_visualizer_model.pkl", "wb") as fh:
             pickle.dump(classifier, fh)
 
+        session_lines = []
+        for session_id, score in sorted(loso.session_scores.items()):
+            session_lines.append(f"S{session_id}: {score:.3f}")
+        session_summary = "  ".join(session_lines) if session_lines else "No valid held-out sessions"
+
         cue.text = "Model ready"
         status.text = (
             f"Files used: {dataset.n_files_used}/{dataset.n_files_found}  "
             f"Trials: {dataset.n_trials}  Windows: {dataset.n_windows}\n"
             f"{label_cfg.left_name}: {counts[int(stim_cfg.left_code)]}  "
             f"{label_cfg.right_name}: {counts[int(stim_cfg.right_code)]}\n"
+            f"LOSO mean={loso.mean_accuracy:.3f} std={loso.std_accuracy:.3f}\n"
+            f"{session_summary}\n"
             "Press SPACE to start live feedback. ESC to quit."
         )
         detected.text = (
-            f"Window={task_cfg.train_window_s:.1f}s  "
-            f"Step={task_cfg.train_window_step_s:.1f}s  "
+            f"Window={task_cfg.window_s:.1f}s  "
+            f"Step={task_cfg.window_step_s:.2f}s  "
             f"Filter={eeg_cfg.l_freq:.1f}-{eeg_cfg.h_freq:.1f} Hz"
         )
         update_bar(0.0)
@@ -232,7 +203,7 @@ def run_task(fname: str):
         cue.text = "Live motor imagery"
         status.text = (
             f"Imagine {label_cfg.left_name} or {label_cfg.right_name} hand movement to drive the bar.\n"
-            "Press ESC to stop."
+            "No smoothing is applied. Press ESC to stop."
         )
         detected.text = ""
         update_bar(0.0)
@@ -249,29 +220,21 @@ def run_task(fname: str):
             n_channels=len(model_ch_names),
         )
         live_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
-        keep_n = int(round((task_cfg.train_window_s + task_cfg.filter_context_s) * sfreq))
+        keep_n = int(round((task_cfg.window_s + task_cfg.filter_context_s) * sfreq))
         stream_pull_s = max(0.20, task_cfg.live_update_interval_s * 2.0)
         last_live_ts: float | None = None
 
         while session_clock.getTime() < task_cfg.live_duration_s:
-            poll_escape()
+            if "escape" in event.getKeys():
+                raise KeyboardInterrupt
 
             data, ts = stream.get_data(winsize=stream_pull_s, picks="all")
             if data.size > 0 and ts is not None and len(ts) > 0:
                 ts = np.asarray(ts)
-                if last_live_ts is None:
-                    mask = np.ones_like(ts, dtype=bool)
-                else:
-                    mask = ts > float(last_live_ts)
+                mask = np.ones_like(ts, dtype=bool) if last_live_ts is None else (ts > float(last_live_ts))
                 if np.any(mask):
                     x_new = np.asarray(data[:, mask], dtype=np.float32)
                     last_live_ts = float(ts[mask][-1])
-                    x_new = rereference_and_select(
-                        data=x_new,
-                        channel_names=stream_ch_names,
-                        target_channel_names=model_ch_names,
-                        reref_channel_name=live_ref_name,
-                    )
                     x_new_filt = live_filter.process(x_new)
                     live_buffer = np.concatenate((live_buffer, x_new_filt), axis=1)
                     if live_buffer.shape[1] > keep_n:
@@ -279,24 +242,22 @@ def run_task(fname: str):
 
             if pred_clock.getTime() >= task_cfg.live_update_interval_s:
                 pred_clock.reset()
-                if live_buffer.shape[1] >= w_samples:
-                    x_win = live_buffer[:, -w_samples:]
+                if live_buffer.shape[1] >= window_n:
+                    x_win = live_buffer[:, -window_n:]
                     if reject_thresh is None or float(np.ptp(x_win, axis=-1).max()) <= float(reject_thresh):
-                        p_raw = classifier.predict_proba(x_win[np.newaxis, ...])[0]
-                        p_vec = smoother.update(p_raw)
+                        p_vec = classifier.predict_proba(x_win[np.newaxis, ...])[0]
                         prediction_count += 1
                         live_note = "updating"
                     else:
                         live_note = "artifact reject"
                 else:
-                    needed_s = max(0.0, (w_samples - live_buffer.shape[1]) / sfreq)
+                    needed_s = max(0.0, (window_n - live_buffer.shape[1]) / sfreq)
                     live_note = f"warming up ({needed_s:.1f}s)"
 
             left_p = float(p_vec[class_index[int(stim_cfg.left_code)]])
             right_p = float(p_vec[class_index[int(stim_cfg.right_code)]])
             signed_score = right_p - left_p
-            display_score = 0.0 if abs(signed_score) < float(task_cfg.live_deadband) else signed_score
-            update_bar(display_score)
+            update_bar(signed_score)
             detected.text = (
                 f"{label_cfg.left_name}: {left_p:.2f}   "
                 f"{label_cfg.right_name}: {right_p:.2f}   "

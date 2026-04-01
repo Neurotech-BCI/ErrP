@@ -8,10 +8,9 @@ import numpy as np
 from pyriemann.estimation import Covariances
 from pyriemann.tangentspace import TangentSpace
 from scipy.signal import butter, iirnotch, sosfilt, sosfilt_zi, tf2sos
-from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import balanced_accuracy_score, confusion_matrix, f1_score
+from sklearn.metrics import accuracy_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -46,7 +45,7 @@ def _build_wideband_sos(eeg_cfg: EEGConfig, sfreq: float) -> np.ndarray:
 
 
 class StreamingIIRFilter:
-    """Channel-wise causal SOS filter with persistent per-channel state."""
+    """Channel-wise causal SOS filter with persistent state."""
 
     def __init__(self, sos: np.ndarray, n_channels: int):
         sos = np.asarray(sos, dtype=np.float64)
@@ -71,8 +70,7 @@ class StreamingIIRFilter:
             raise ValueError(
                 f"Expected chunk shape ({self.n_channels}, n_samples), got {X.shape}"
             )
-        n_samples = int(X.shape[1])
-        if n_samples == 0:
+        if X.shape[1] == 0:
             return np.empty_like(X, dtype=np.float32)
 
         Y = np.empty_like(X, dtype=np.float64)
@@ -89,12 +87,13 @@ class StreamingIIRFilter:
 
 
 def filter_block(block: np.ndarray, eeg_cfg: EEGConfig, sfreq: float) -> np.ndarray:
-    """Causal wideband filtering for one continuous block."""
     X = np.asarray(block, dtype=np.float32, order="C")
     if X.ndim != 2:
-        raise ValueError(f"Expected 2-D block (n_ch, n_samples), got {X.shape}")
+        raise ValueError(f"Expected 2-D block (n_channels, n_samples), got {X.shape}")
     filt = StreamingIIRFilter.from_eeg_config(
-        eeg_cfg=eeg_cfg, sfreq=float(sfreq), n_channels=int(X.shape[0])
+        eeg_cfg=eeg_cfg,
+        sfreq=float(sfreq),
+        n_channels=int(X.shape[0]),
     )
     return filt.process(X)
 
@@ -109,39 +108,92 @@ def split_windows(
     window_s: float,
     step_s: float,
 ) -> np.ndarray:
-    """Split one continuous block into fixed windows.
-
-    block shape: (n_ch, n_samples).
-    returns shape: (n_windows, n_ch, n_window_samples).
-    """
-    n_ch, n_samples = block.shape
-    w = int(round(float(window_s) * float(sfreq)))
-    h = int(round(float(step_s) * float(sfreq)))
-    if w <= 0 or h <= 0:
+    n_channels, n_samples = block.shape
+    window_n = int(round(float(window_s) * float(sfreq)))
+    step_n = int(round(float(step_s) * float(sfreq)))
+    if window_n <= 0 or step_n <= 0:
         raise ValueError("window_s and step_s must produce at least one sample")
-    if n_samples < w:
-        return np.empty((0, n_ch, w), dtype=np.float32)
-    starts = np.arange(0, n_samples - w + 1, h, dtype=int)
-    out = np.empty((len(starts), n_ch, w), dtype=np.float32)
-    for i, s in enumerate(starts):
-        out[i] = block[:, s : s + w]
-    return out
+    if n_samples < window_n:
+        return np.empty((0, n_channels, window_n), dtype=np.float32)
+    starts = np.arange(0, n_samples - window_n + 1, step_n, dtype=int)
+    windows = np.empty((len(starts), n_channels, window_n), dtype=np.float32)
+    for i, start in enumerate(starts):
+        windows[i] = block[:, start:start + window_n]
+    return windows
 
 
 # ---------------------------------------------------------------------------
-# EDF-backed MI training data
+# Filter-bank helper kept for bci_worker compatibility
+# ---------------------------------------------------------------------------
+
+def _iir_bandpass_epochs(X: np.ndarray, sfreq: float, lo: float, hi: float) -> np.ndarray:
+    X64 = np.asarray(X, dtype=np.float64)
+    orig_shape = X64.shape
+    if X64.ndim == 3:
+        X64 = X64.reshape(-1, orig_shape[-1])
+    sos = _build_sos_bandpass(sfreq=float(sfreq), lo=float(lo), hi=float(hi), order=4)
+    zi_template = sosfilt_zi(sos).astype(np.float64, copy=False)
+    filtered = np.empty_like(X64, dtype=np.float64)
+    for i in range(X64.shape[0]):
+        x = X64[i]
+        zi = zi_template * float(x[0])
+        y, _ = sosfilt(sos, x, zi=zi)
+        filtered[i] = y
+    return filtered.reshape(orig_shape).astype(np.float32, copy=False)
+
+
+class FilterBankTangentSpace(BaseEstimator, TransformerMixin):
+    """Per-band covariance -> tangent space projection, concatenated."""
+
+    def __init__(self, bands=((4, 8), (8, 13), (13, 30), (30, 45)), sfreq: float = 300.0, cov_estimator: str = "oas"):
+        self.bands = bands
+        self.sfreq = sfreq
+        self.cov_estimator = cov_estimator
+
+    def fit(self, X, y=None):
+        self.cov_estimators_: list[Covariances] = []
+        self.ts_estimators_: list[TangentSpace] = []
+        for lo, hi in self.bands:
+            X_band = _iir_bandpass_epochs(X, self.sfreq, lo, hi)
+            cov_est = Covariances(estimator=self.cov_estimator)
+            covs = cov_est.fit_transform(X_band)
+            ts = TangentSpace(metric="riemann")
+            ts.fit(covs)
+            self.cov_estimators_.append(cov_est)
+            self.ts_estimators_.append(ts)
+        return self
+
+    def transform(self, X):
+        parts = []
+        for i, (lo, hi) in enumerate(self.bands):
+            X_band = _iir_bandpass_epochs(X, self.sfreq, lo, hi)
+            covs = self.cov_estimators_[i].transform(X_band)
+            parts.append(self.ts_estimators_[i].transform(covs))
+        return np.concatenate(parts, axis=1)
+
+
+# ---------------------------------------------------------------------------
+# Offline EDF-backed MI dataset
 # ---------------------------------------------------------------------------
 
 @dataclass
 class OfflineMIDataset:
     X: np.ndarray
     y: np.ndarray
+    session_ids: np.ndarray
     sfreq: float
     channel_names: list[str]
     n_files_found: int
     n_files_used: int
     n_trials: int
     n_windows: int
+
+
+@dataclass
+class LOSOResult:
+    session_scores: dict[int, float]
+    mean_accuracy: float
+    std_accuracy: float
 
 
 def canonicalize_channel_name(name: str) -> str:
@@ -167,8 +219,7 @@ def resolve_channel_order(
     resolved: list[str] = []
     missing: list[str] = []
     for desired in desired_names:
-        key = canonicalize_channel_name(desired)
-        actual = actual_by_key.get(key)
+        actual = actual_by_key.get(canonicalize_channel_name(desired))
         if actual is None:
             missing.append(str(desired))
         else:
@@ -176,23 +227,9 @@ def resolve_channel_order(
     return resolved, missing
 
 
-def resolve_optional_channel(
-    available_names: list[str] | tuple[str, ...],
-    desired_name: str | None,
-) -> str | None:
-    if desired_name is None:
-        return None
-    resolved, _ = resolve_channel_order(available_names, [desired_name])
-    return resolved[0] if resolved else None
-
-
-def _standardize_edf_channels(
-    raw: mne.io.BaseRaw,
-    reref_channel: str | None = None,
-) -> mne.io.BaseRaw:
-    actual_ref = resolve_optional_channel(raw.ch_names, reref_channel)
-    if actual_ref is not None:
-        raw.set_eeg_reference(ref_channels=[actual_ref], verbose="ERROR")
+def standardize_offline_raw(raw: mne.io.BaseRaw) -> mne.io.BaseRaw:
+    if "EEG LE-Pz" in raw.ch_names:
+        raw.set_eeg_reference(ref_channels=["EEG LE-Pz"], verbose="ERROR")
 
     rename_map: dict[str, str] = {}
     for ch_name in raw.ch_names:
@@ -211,54 +248,21 @@ def _standardize_edf_channels(
     return raw
 
 
-def rereference_and_select(
-    data: np.ndarray,
-    channel_names: list[str] | tuple[str, ...],
-    target_channel_names: list[str] | tuple[str, ...],
-    reref_channel_name: str | None = None,
-) -> np.ndarray:
-    X = np.asarray(data, dtype=np.float32)
-    name_to_idx = {str(name): i for i, name in enumerate(channel_names)}
-    target_idx = [name_to_idx[str(name)] for name in target_channel_names]
-    X_target = X[target_idx]
-
-    if reref_channel_name is None:
-        return X_target.astype(np.float32, copy=False)
-
-    ref_idx = name_to_idx.get(str(reref_channel_name))
-    if ref_idx is None:
-        return X_target.astype(np.float32, copy=False)
-
-    ref = X[ref_idx:ref_idx + 1]
-    return (X_target - ref).astype(np.float32, copy=False)
-
-
-def _find_stim_channel(raw: mne.io.BaseRaw) -> str:
-    candidates = (
-        "Trigger",
-        "TRG",
-        "TRIGGER",
-        "trigger",
-        "STI",
-        "stim",
-        "Status",
-        "status",
-    )
-    available = list(raw.ch_names)
+def find_stim_channel(raw: mne.io.BaseRaw) -> str:
+    candidates = ("Trigger", "TRG", "TRIGGER", "trigger", "STI", "stim", "Status", "status")
     for candidate in candidates:
-        if candidate in available:
+        if candidate in raw.ch_names:
             return candidate
+    raise RuntimeError(f"Could not find trigger channel in EDF. Available channels: {raw.ch_names}")
 
-    by_key = {canonicalize_channel_name(name): name for name in available}
-    for candidate in candidates:
-        actual = by_key.get(canonicalize_channel_name(candidate))
-        if actual is not None:
-            return actual
 
-    raise RuntimeError(
-        "Could not find a trigger/stim channel in EDF. "
-        f"Available channels: {available}"
-    )
+def make_mi_classifier(model_cfg: MentalCommandModelConfig) -> Pipeline:
+    return Pipeline([
+        ("cov", Covariances(estimator=model_cfg.cov_estimator)),
+        ("ts", TangentSpace(metric="riemann")),
+        ("scaler", StandardScaler()),
+        ("clf", LinearDiscriminantAnalysis()),
+    ])
 
 
 def load_offline_mi_dataset(
@@ -269,7 +273,6 @@ def load_offline_mi_dataset(
     stim_cfg: StimConfig,
     target_sfreq: float,
     target_channel_names: list[str] | tuple[str, ...],
-    reref_channel_name: str | None = None,
 ) -> OfflineMIDataset:
     data_path = Path(data_dir).expanduser()
     edf_paths = sorted(data_path.rglob(edf_glob))
@@ -284,24 +287,19 @@ def load_offline_mi_dataset(
 
     all_windows: list[np.ndarray] = []
     all_labels: list[np.ndarray] = []
+    all_session_ids: list[np.ndarray] = []
     n_trials = 0
     n_files_used = 0
 
-    for edf_path in edf_paths:
+    for session_id, edf_path in enumerate(edf_paths):
         raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
-        raw = _standardize_edf_channels(raw, reref_channel=reref_channel_name)
-        stim_channel = _find_stim_channel(raw)
-
-        events = mne.find_events(
-            raw,
-            stim_channel=stim_channel,
-            min_duration=0.0,
-            verbose=False,
-        )
-        if len(events) == 0:
-            continue
+        raw = standardize_offline_raw(raw)
+        stim_channel = find_stim_channel(raw)
 
         original_sfreq = float(raw.info["sfreq"])
+        events = mne.find_events(raw, stim_channel=stim_channel, min_duration=0.0, verbose=False)
+        if len(events) == 0:
+            continue
         event_times_s = events[:, 0].astype(np.float64) / original_sfreq
 
         if abs(original_sfreq - float(target_sfreq)) > 1e-6:
@@ -314,12 +312,7 @@ def load_offline_mi_dataset(
                 f"Available channels: {raw.ch_names}"
             )
 
-        actual_ref = resolve_optional_channel(raw.ch_names, reref_channel_name)
-        load_names = list(picks)
-        if actual_ref is not None and actual_ref not in load_names:
-            load_names.append(actual_ref)
-
-        raw_data = raw.get_data(picks=load_names).astype(np.float32, copy=False)
+        eeg_data = raw.get_data(picks=picks).astype(np.float32, copy=False)
         file_used = False
 
         for event_time_s, event_code in zip(event_times_s, events[:, 2]):
@@ -331,20 +324,14 @@ def load_offline_mi_dataset(
             if start < 0 or stop > eeg_data.shape[1]:
                 continue
 
-            segment = raw_data[:, start:stop]
-            segment = rereference_and_select(
-                data=segment,
-                channel_names=load_names,
-                target_channel_names=target_channel_names,
-                reref_channel_name=actual_ref,
-            )
-            filtered_segment = filter_block(segment, eeg_cfg=eeg_cfg, sfreq=float(target_sfreq))
-            trial = filtered_segment[:, context_n: context_n + epoch_n]
+            segment = eeg_data[:, start:stop]
+            filtered = filter_block(segment, eeg_cfg=eeg_cfg, sfreq=float(target_sfreq))
+            epoch = filtered[:, context_n:context_n + epoch_n]
             windows = split_windows(
-                block=trial,
+                block=epoch,
                 sfreq=float(target_sfreq),
-                window_s=float(task_cfg.train_window_s),
-                step_s=float(task_cfg.train_window_step_s),
+                window_s=float(task_cfg.window_s),
+                step_s=float(task_cfg.window_step_s),
             )
             if windows.shape[0] == 0:
                 continue
@@ -357,6 +344,7 @@ def load_offline_mi_dataset(
 
             all_windows.append(windows)
             all_labels.append(np.full(windows.shape[0], int(event_code), dtype=int))
+            all_session_ids.append(np.full(windows.shape[0], int(session_id), dtype=int))
             n_trials += 1
             file_used = True
 
@@ -365,15 +353,17 @@ def load_offline_mi_dataset(
 
     if not all_windows:
         raise RuntimeError(
-            "No usable left/right training windows were extracted from the EDF folder. "
-            "Check the data path, trigger codes, and channel alignment."
+            "No usable left/right windows were extracted from the EDF folder. "
+            "Check the path, trigger codes, and channel names."
         )
 
     X = np.concatenate(all_windows, axis=0).astype(np.float32, copy=False)
     y = np.concatenate(all_labels, axis=0).astype(int, copy=False)
+    session_ids = np.concatenate(all_session_ids, axis=0).astype(int, copy=False)
     return OfflineMIDataset(
         X=X,
         y=y,
+        session_ids=session_ids,
         sfreq=float(target_sfreq),
         channel_names=[str(name) for name in target_channel_names],
         n_files_found=len(edf_paths),
@@ -383,234 +373,39 @@ def load_offline_mi_dataset(
     )
 
 
-# ---------------------------------------------------------------------------
-# Sub-band helper (shared by both feature extractors)
-# ---------------------------------------------------------------------------
+def evaluate_loso_sessions(
+    dataset: OfflineMIDataset,
+    model_cfg: MentalCommandModelConfig,
+) -> LOSOResult:
+    session_scores: dict[int, float] = {}
+    unique_sessions = np.unique(dataset.session_ids)
 
-def _iir_bandpass(X: np.ndarray, sfreq: float, lo: float, hi: float) -> np.ndarray:
-    """Causal IIR bandpass on an (n_windows, n_ch, n_samples) array."""
-    X64 = np.asarray(X, dtype=np.float64)
-    orig_shape = X64.shape
-    if X64.ndim == 3:
-        X64 = X64.reshape(-1, orig_shape[-1])
-    sos = _build_sos_bandpass(sfreq=float(sfreq), lo=float(lo), hi=float(hi), order=4)
-    zi_template = sosfilt_zi(sos).astype(np.float64, copy=False)
-    filtered = np.empty_like(X64, dtype=np.float64)
-    for i in range(X64.shape[0]):
-        x = X64[i]
-        zi = zi_template * float(x[0])
-        y, _ = sosfilt(sos, x, zi=zi)
-        filtered[i] = y
-    return filtered.reshape(orig_shape).astype(np.float32, copy=False)
-
-
-# ---------------------------------------------------------------------------
-# Feature extractors
-# ---------------------------------------------------------------------------
-
-class FilterBankTangentSpace(BaseEstimator, TransformerMixin):
-    """Per-band Riemannian covariance → tangent-space projection, concatenated."""
-
-    def __init__(self, bands=((4, 8), (8, 13), (13, 30), (30, 45)),
-                 sfreq: float = 300.0, cov_estimator: str = "oas"):
-        self.bands = bands
-        self.sfreq = sfreq
-        self.cov_estimator = cov_estimator
-
-    def fit(self, X, y=None):
-        self.cov_estimators_: list[Covariances] = []
-        self.ts_estimators_: list[TangentSpace] = []
-        for lo, hi in self.bands:
-            X_band = _iir_bandpass(X, self.sfreq, lo, hi)
-            cov_est = Covariances(estimator=self.cov_estimator)
-            covs = cov_est.fit_transform(X_band)
-            ts = TangentSpace(metric="riemann")
-            ts.fit(covs)
-            self.cov_estimators_.append(cov_est)
-            self.ts_estimators_.append(ts)
-        return self
-
-    def transform(self, X):
-        parts = []
-        for i, (lo, hi) in enumerate(self.bands):
-            X_band = _iir_bandpass(X, self.sfreq, lo, hi)
-            covs = self.cov_estimators_[i].transform(X_band)
-            parts.append(self.ts_estimators_[i].transform(covs))
-        return np.concatenate(parts, axis=1)
-
-
-class LogBandPowerFeatures(BaseEstimator, TransformerMixin):
-    """Log-variance (≈ log band power) per channel per sub-band."""
-
-    def __init__(self, bands=((4, 8), (8, 13), (13, 30), (30, 45)),
-                 sfreq: float = 300.0):
-        self.bands = bands
-        self.sfreq = sfreq
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X):
-        parts = []
-        for lo, hi in self.bands:
-            X_band = _iir_bandpass(X, self.sfreq, lo, hi)
-            log_bp = np.log(np.var(X_band, axis=-1) + 1e-10)
-            parts.append(log_bp)
-        return np.concatenate(parts, axis=1)
-
-
-# ---------------------------------------------------------------------------
-# Pipeline constructors
-# ---------------------------------------------------------------------------
-
-def _make_lr(model_cfg: MentalCommandModelConfig) -> LogisticRegression:
-    return LogisticRegression(
-        C=float(model_cfg.C),
-        solver="lbfgs",
-        multi_class="multinomial",
-        max_iter=int(model_cfg.max_iter),
-        class_weight=model_cfg.class_weight,
-        random_state=42,
-    )
-
-
-def make_fb_riemannian_classifier(
-    model_cfg: MentalCommandModelConfig, sfreq: float,
-) -> Pipeline:
-    return Pipeline([
-        ("fb_ts", FilterBankTangentSpace(
-            bands=model_cfg.filter_bank_bands,
-            sfreq=sfreq,
-        )),
-        ("scaler", StandardScaler()),
-        ("clf", _make_lr(model_cfg)),
-    ])
-
-
-def make_bandpower_classifier(
-    model_cfg: MentalCommandModelConfig, sfreq: float,
-) -> Pipeline:
-    return Pipeline([
-        ("bp", LogBandPowerFeatures(
-            bands=model_cfg.filter_bank_bands,
-            sfreq=sfreq,
-        )),
-        ("scaler", StandardScaler()),
-        ("clf", _make_lr(model_cfg)),
-    ])
-
-
-def make_mi_classifier(model_cfg: MentalCommandModelConfig) -> Pipeline:
-    """Single-band Riemannian classifier for left/right motor imagery windows."""
-    return Pipeline([
-        ("cov", Covariances(estimator=model_cfg.cov_estimator)),
-        ("ts", TangentSpace(metric="riemann")),
-        ("scaler", StandardScaler()),
-        ("clf", LinearDiscriminantAnalysis()),
-    ])
-
-
-# ---------------------------------------------------------------------------
-# Cross-validation quality estimate
-# ---------------------------------------------------------------------------
-
-@dataclass
-class MCQuality:
-    balanced_accuracy: float
-    macro_f1: float
-    n_samples: int
-    n_per_class: dict[str, int]
-    per_class_accuracy: dict[str, float]
-
-
-def evaluate_cv_quality(
-    X: np.ndarray,
-    y: np.ndarray,
-    block_ids: np.ndarray,
-    pipeline: Pipeline,
-) -> MCQuality:
-    """LOGO-by-block-triplet CV (leave one neutral/c1/c2 block-group out)."""
-    y = np.asarray(y, dtype=int)
-    block_ids = np.asarray(block_ids, dtype=int)
-    if y.shape[0] != X.shape[0] or block_ids.shape[0] != X.shape[0]:
-        raise ValueError("X, y, and block_ids must have the same first dimension")
-
-    classes, counts = np.unique(y, return_counts=True)
-    class_block_ids: dict[int, np.ndarray] = {}
-    for c in classes:
-        class_mask = y == int(c)
-        class_block_ids[int(c)] = np.sort(np.unique(block_ids[class_mask]))
-
-    ref_block_ids = class_block_ids[int(classes[0])]
-    for c in classes[1:]:
-        if not np.array_equal(class_block_ids[int(c)], ref_block_ids):
-            block_counts = {int(k): class_block_ids[int(k)].tolist() for k in classes}
-            raise ValueError(
-                "Per-class block ids do not align for triplet-LOGO CV: "
-                f"{block_counts}"
-            )
-
-    n_splits = int(len(ref_block_ids))
-    if n_splits < 2:
-        block_counts = {int(c): len(class_block_ids[int(c)]) for c in classes}
-        raise ValueError(
-            f"Not enough registration blocks for grouped CV: per-class blocks={block_counts}"
-        )
-
-    y_pred = np.full_like(y, fill_value=-1)
-    for held_out_block in ref_block_ids:
-        test_mask = block_ids == int(held_out_block)
+    for session_id in unique_sessions:
+        test_mask = dataset.session_ids == int(session_id)
         train_mask = ~test_mask
         if not np.any(test_mask) or not np.any(train_mask):
-            raise ValueError(f"Invalid CV split at held-out block {int(held_out_block)}")
+            continue
 
-        test_classes = np.unique(y[test_mask])
-        if len(test_classes) != len(classes):
-            raise ValueError(
-                f"Held-out block {int(held_out_block)} missing classes: present={test_classes}, expected={classes}"
-            )
+        y_train = dataset.y[train_mask]
+        y_test = dataset.y[test_mask]
+        if len(np.unique(y_train)) < 2 or len(np.unique(y_test)) < 2:
+            continue
 
-        fold_clf = clone(pipeline)
-        fold_clf.fit(X[train_mask], y[train_mask])
-        y_pred[test_mask] = fold_clf.predict(X[test_mask])
+        clf = make_mi_classifier(model_cfg)
+        clf.fit(dataset.X[train_mask], y_train)
+        y_pred = clf.predict(dataset.X[test_mask])
+        session_scores[int(session_id)] = float(accuracy_score(y_test, y_pred))
 
-    if np.any(y_pred < 0):
-        raise RuntimeError("CV prediction vector contains unassigned samples")
+    if session_scores:
+        scores = np.asarray(list(session_scores.values()), dtype=np.float64)
+        mean_accuracy = float(np.mean(scores))
+        std_accuracy = float(np.std(scores))
+    else:
+        mean_accuracy = 0.0
+        std_accuracy = 0.0
 
-    cm = confusion_matrix(y, y_pred, labels=classes)
-    denom = np.sum(cm, axis=1)
-    per_class_acc = {}
-    for i, c in enumerate(classes):
-        per_class_acc[str(int(c))] = float(cm[i, i] / denom[i]) if denom[i] > 0 else 0.0
-
-    return MCQuality(
-        balanced_accuracy=float(balanced_accuracy_score(y, y_pred)),
-        macro_f1=float(f1_score(y, y_pred, average="macro")),
-        n_samples=int(len(y)),
-        n_per_class={str(int(c)): int(n) for c, n in zip(classes, counts)},
-        per_class_accuracy=per_class_acc,
+    return LOSOResult(
+        session_scores=session_scores,
+        mean_accuracy=mean_accuracy,
+        std_accuracy=std_accuracy,
     )
-
-
-# ---------------------------------------------------------------------------
-# Live-mode smoother
-# ---------------------------------------------------------------------------
-
-class EMAProbSmoother:
-    def __init__(self, alpha: float, n_classes: int):
-        self.alpha = float(alpha)
-        self.n_classes = int(n_classes)
-        self._state: np.ndarray | None = None
-
-    def update(self, p: np.ndarray) -> np.ndarray:
-        p = np.asarray(p, dtype=np.float64)
-        if p.shape != (self.n_classes,):
-            raise ValueError(f"Expected probs shape ({self.n_classes},), got {p.shape}")
-        if self._state is None:
-            self._state = p.copy()
-        else:
-            self._state = (1.0 - self.alpha) * self._state + self.alpha * p
-        s = float(np.sum(self._state))
-        if s > 0:
-            self._state = self._state / s
-        return self._state.copy()

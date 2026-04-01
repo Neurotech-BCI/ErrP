@@ -128,18 +128,16 @@ class MentalCommandTaskConfig:
     # Each cued MI execution epoch is 3 seconds long in the offline task.
     epoch_duration_s: float = 3.0
 
-    # Sliding-window extraction used for both offline training and live decoding.
-    train_window_s: float = 1.0
-    train_window_step_s: float = 0.25
+    # Sliding-window decoder definition used for both offline and online data.
+    window_s: float = 1.0
+    window_step_s: float = 0.50
 
-    # Extra pre-onset context included before each training epoch and retained
-    # in the live ring buffer so causal filtering behaves consistently.
+    # Extra pre-onset context included before each offline epoch and retained in
+    # the live buffer so causal filtering behaves consistently.
     filter_context_s: float = 2.0
 
     # Continuous live feedback settings.
-    live_update_interval_s: float = 0.10
-    live_display_smoothing_alpha: float = 0.25
-    live_deadband: float = 0.10
+    live_update_interval_s: float = 0.50
 
     # Visualization runtime.
     live_duration_s: float = 180.0
@@ -147,13 +145,4 @@ class MentalCommandTaskConfig:
 
 @dataclass(frozen=True)
 class MentalCommandModelConfig:
-    C: float = 1.0
-    max_iter: int = 1500
-    class_weight: str | None = "balanced"
-    filter_bank_bands: tuple[tuple[float, float], ...] = (
-        (4.0, 8.0),
-        (8.0, 13.0),
-        (13.0, 30.0),
-        (30.0, 45.0),
-    )
     cov_estimator: str = "oas"
