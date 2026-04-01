@@ -16,7 +16,9 @@ from mental_command_worker import (
     canonicalize_channel_name,
     load_offline_mi_dataset,
     make_mi_classifier,
+    rereference_and_select,
     resolve_channel_order,
+    resolve_optional_channel,
 )
 
 
@@ -31,6 +33,7 @@ def run_task(fname: str):
         l_freq=8.0,
         h_freq=30.0,
         reject_peak_to_peak=150.0,
+        reref_channel="LE",
     )
 
     stream = StreamLSL(
@@ -43,19 +46,29 @@ def run_task(fname: str):
     print(f"[LSL] Stream info: {stream.info}")
 
     available = list(stream.info["ch_names"])
-    eeg_picks, missing = resolve_channel_order(available, eeg_cfg.picks)
-    if len(eeg_picks) < 2:
+    model_ch_names, missing = resolve_channel_order(available, eeg_cfg.picks)
+    if len(model_ch_names) < 2:
         event_key = canonicalize_channel_name(lsl_cfg.event_channels)
-        eeg_picks = [ch for ch in available if canonicalize_channel_name(ch) != event_key]
-    if len(eeg_picks) < 2:
+        model_ch_names = [ch for ch in available if canonicalize_channel_name(ch) != event_key]
+    if len(model_ch_names) < 2:
         raise RuntimeError(f"Need >=2 EEG channels, found: {available}")
 
-    stream.pick(eeg_picks)
+    live_ref_name = resolve_optional_channel(available, eeg_cfg.reref_channel)
+    stream_pick_names = list(model_ch_names)
+    if live_ref_name is not None and live_ref_name not in stream_pick_names:
+        stream_pick_names.append(live_ref_name)
+
+    stream.pick(stream_pick_names)
     sfreq = float(stream.info["sfreq"])
-    ch_names = list(stream.info["ch_names"])
-    print(f"[LSL] Connected: sfreq={sfreq:.1f} Hz, channels={ch_names}")
+    stream_ch_names = list(stream.info["ch_names"])
+    print(f"[LSL] Connected: sfreq={sfreq:.1f} Hz, channels={stream_ch_names}")
     if missing:
         print(f"[LSL] Missing configured channels from live stream: {missing}")
+    if live_ref_name is None and eeg_cfg.reref_channel is not None:
+        print(
+            f"[LSL] Reference channel {eeg_cfg.reref_channel!r} not present in the live stream. "
+            "Training EDFs will be loaded without extra rereferencing to stay aligned with live data."
+        )
 
     win = visual.Window(size=(1280, 760), color=(-0.08, -0.08, -0.08), units="norm", fullscr=False)
     title = visual.TextStim(win, text="Motor Imagery Visualizer", pos=(0, 0.78), height=0.06, color=(0.9, 0.9, 0.9))
@@ -176,7 +189,8 @@ def run_task(fname: str):
             task_cfg=task_cfg,
             stim_cfg=stim_cfg,
             target_sfreq=sfreq,
-            target_channel_names=ch_names,
+            target_channel_names=model_ch_names,
+            reref_channel_name=live_ref_name,
         )
         classes_present = {int(c) for c in np.unique(dataset.y)}
         expected_classes = {int(stim_cfg.left_code), int(stim_cfg.right_code)}
@@ -226,13 +240,15 @@ def run_task(fname: str):
         pred_clock = core.Clock()
         session_clock = core.Clock()
         p_vec = np.array([0.5, 0.5], dtype=np.float64)
+        prediction_count = 0
+        live_note = "warming up"
 
         live_filter = StreamingIIRFilter.from_eeg_config(
             eeg_cfg=eeg_cfg,
             sfreq=sfreq,
-            n_channels=len(ch_names),
+            n_channels=len(model_ch_names),
         )
-        live_buffer = np.empty((len(ch_names), 0), dtype=np.float32)
+        live_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
         keep_n = int(round((task_cfg.train_window_s + task_cfg.filter_context_s) * sfreq))
         stream_pull_s = max(0.20, task_cfg.live_update_interval_s * 2.0)
         last_live_ts: float | None = None
@@ -250,6 +266,12 @@ def run_task(fname: str):
                 if np.any(mask):
                     x_new = np.asarray(data[:, mask], dtype=np.float32)
                     last_live_ts = float(ts[mask][-1])
+                    x_new = rereference_and_select(
+                        data=x_new,
+                        channel_names=stream_ch_names,
+                        target_channel_names=model_ch_names,
+                        reref_channel_name=live_ref_name,
+                    )
                     x_new_filt = live_filter.process(x_new)
                     live_buffer = np.concatenate((live_buffer, x_new_filt), axis=1)
                     if live_buffer.shape[1] > keep_n:
@@ -262,6 +284,13 @@ def run_task(fname: str):
                     if reject_thresh is None or float(np.ptp(x_win, axis=-1).max()) <= float(reject_thresh):
                         p_raw = classifier.predict_proba(x_win[np.newaxis, ...])[0]
                         p_vec = smoother.update(p_raw)
+                        prediction_count += 1
+                        live_note = "updating"
+                    else:
+                        live_note = "artifact reject"
+                else:
+                    needed_s = max(0.0, (w_samples - live_buffer.shape[1]) / sfreq)
+                    live_note = f"warming up ({needed_s:.1f}s)"
 
             left_p = float(p_vec[class_index[int(stim_cfg.left_code)]])
             right_p = float(p_vec[class_index[int(stim_cfg.right_code)]])
@@ -270,7 +299,10 @@ def run_task(fname: str):
             update_bar(display_score)
             detected.text = (
                 f"{label_cfg.left_name}: {left_p:.2f}   "
-                f"{label_cfg.right_name}: {right_p:.2f}"
+                f"{label_cfg.right_name}: {right_p:.2f}   "
+                f"margin={signed_score:+.2f}   "
+                f"updates={prediction_count}   "
+                f"{live_note}"
             )
             draw_frame()
 

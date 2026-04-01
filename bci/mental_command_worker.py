@@ -176,9 +176,23 @@ def resolve_channel_order(
     return resolved, missing
 
 
-def _standardize_edf_channels(raw: mne.io.BaseRaw) -> mne.io.BaseRaw:
-    if "EEG LE-Pz" in raw.ch_names:
-        raw.set_eeg_reference(ref_channels=["EEG LE-Pz"], verbose="ERROR")
+def resolve_optional_channel(
+    available_names: list[str] | tuple[str, ...],
+    desired_name: str | None,
+) -> str | None:
+    if desired_name is None:
+        return None
+    resolved, _ = resolve_channel_order(available_names, [desired_name])
+    return resolved[0] if resolved else None
+
+
+def _standardize_edf_channels(
+    raw: mne.io.BaseRaw,
+    reref_channel: str | None = None,
+) -> mne.io.BaseRaw:
+    actual_ref = resolve_optional_channel(raw.ch_names, reref_channel)
+    if actual_ref is not None:
+        raw.set_eeg_reference(ref_channels=[actual_ref], verbose="ERROR")
 
     rename_map: dict[str, str] = {}
     for ch_name in raw.ch_names:
@@ -195,6 +209,28 @@ def _standardize_edf_channels(raw: mne.io.BaseRaw) -> mne.io.BaseRaw:
     if rename_map:
         raw.rename_channels(rename_map)
     return raw
+
+
+def rereference_and_select(
+    data: np.ndarray,
+    channel_names: list[str] | tuple[str, ...],
+    target_channel_names: list[str] | tuple[str, ...],
+    reref_channel_name: str | None = None,
+) -> np.ndarray:
+    X = np.asarray(data, dtype=np.float32)
+    name_to_idx = {str(name): i for i, name in enumerate(channel_names)}
+    target_idx = [name_to_idx[str(name)] for name in target_channel_names]
+    X_target = X[target_idx]
+
+    if reref_channel_name is None:
+        return X_target.astype(np.float32, copy=False)
+
+    ref_idx = name_to_idx.get(str(reref_channel_name))
+    if ref_idx is None:
+        return X_target.astype(np.float32, copy=False)
+
+    ref = X[ref_idx:ref_idx + 1]
+    return (X_target - ref).astype(np.float32, copy=False)
 
 
 def _find_stim_channel(raw: mne.io.BaseRaw) -> str:
@@ -233,6 +269,7 @@ def load_offline_mi_dataset(
     stim_cfg: StimConfig,
     target_sfreq: float,
     target_channel_names: list[str] | tuple[str, ...],
+    reref_channel_name: str | None = None,
 ) -> OfflineMIDataset:
     data_path = Path(data_dir).expanduser()
     edf_paths = sorted(data_path.rglob(edf_glob))
@@ -252,7 +289,7 @@ def load_offline_mi_dataset(
 
     for edf_path in edf_paths:
         raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
-        raw = _standardize_edf_channels(raw)
+        raw = _standardize_edf_channels(raw, reref_channel=reref_channel_name)
         stim_channel = _find_stim_channel(raw)
 
         events = mne.find_events(
@@ -277,7 +314,12 @@ def load_offline_mi_dataset(
                 f"Available channels: {raw.ch_names}"
             )
 
-        eeg_data = raw.get_data(picks=picks).astype(np.float32, copy=False)
+        actual_ref = resolve_optional_channel(raw.ch_names, reref_channel_name)
+        load_names = list(picks)
+        if actual_ref is not None and actual_ref not in load_names:
+            load_names.append(actual_ref)
+
+        raw_data = raw.get_data(picks=load_names).astype(np.float32, copy=False)
         file_used = False
 
         for event_time_s, event_code in zip(event_times_s, events[:, 2]):
@@ -289,7 +331,13 @@ def load_offline_mi_dataset(
             if start < 0 or stop > eeg_data.shape[1]:
                 continue
 
-            segment = eeg_data[:, start:stop]
+            segment = raw_data[:, start:stop]
+            segment = rereference_and_select(
+                data=segment,
+                channel_names=load_names,
+                target_channel_names=target_channel_names,
+                reref_channel_name=actual_ref,
+            )
             filtered_segment = filter_block(segment, eeg_cfg=eeg_cfg, sfreq=float(target_sfreq))
             trial = filtered_segment[:, context_n: context_n + epoch_n]
             windows = split_windows(

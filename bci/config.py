@@ -37,6 +37,11 @@ class EEGConfig:
     picks: tuple[str, ...] = ("Pz", "F4", "C4", "P4", "P3", "C3", "F3")
     #picks: tuple[str, ...] = ("C4", "C3")
 
+    # Optional reference channel to apply consistently to offline EDFs and
+    # the live stream when available. Keep None to leave the incoming
+    # reference unchanged.
+    reref_channel: str | None = None
+
     # Wide bandpass pre-filter (DC removal + anti-aliasing).
     # Sub-band decomposition is handled inside the classifier pipeline.
     l_freq: float = 1.0
