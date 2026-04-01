@@ -132,8 +132,9 @@ class MentalCommandTaskConfig:
     window_s: float = 1.0
     window_step_s: float = 0.50
 
-    # Extra pre-onset context included before each offline epoch and retained in
-    # the live buffer so causal filtering behaves consistently.
+    # Amount of prior filtered history we require before the first live
+    # prediction. Offline sessions are now filtered continuously end-to-end,
+    # so this mainly controls live warmup and how much recent context is kept.
     filter_context_s: float = 2.0
 
     # Continuous live feedback settings.

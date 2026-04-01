@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import pickle
 from collections import Counter
 from datetime import datetime
@@ -20,7 +21,30 @@ from mental_command_worker import (
 )
 
 
+def _make_task_logger(fname: str) -> logging.Logger:
+    logger = logging.getLogger(f"mi_visualizer.{fname}")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if logger.handlers:
+        return logger
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    file_handler = logging.FileHandler(f"{fname}_mi_visualizer.log", mode="w")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    return logger
+
+
 def run_task(fname: str):
+    logger = _make_task_logger(fname)
     lsl_cfg = LSLConfig()
     stim_cfg = StimConfig()
     label_cfg = MentalCommandLabelConfig()
@@ -41,6 +65,7 @@ def run_task(fname: str):
     )
     stream.connect(acquisition_delay=0.001, processing_flags="all")
     print(f"[LSL] Stream info: {stream.info}")
+    logger.info("Connected to LSL stream: info=%s", stream.info)
 
     available = list(stream.info["ch_names"])
     model_ch_names, missing = resolve_channel_order(available, eeg_cfg.picks)
@@ -54,6 +79,12 @@ def run_task(fname: str):
     sfreq = float(stream.info["sfreq"])
     stream_ch_names = list(stream.info["ch_names"])
     print(f"[LSL] Connected: sfreq={sfreq:.1f} Hz, channels={stream_ch_names}")
+    logger.info(
+        "Using live EEG channels: sfreq=%.3f, selected=%s, missing_configured=%s",
+        sfreq,
+        stream_ch_names,
+        missing,
+    )
     if missing:
         print(f"[LSL] Missing configured channels from live stream: {missing}")
 
@@ -134,16 +165,28 @@ def run_task(fname: str):
 
     classifier = None
     class_index = None
+    classifier_classes = None
     dataset = None
     reject_thresh = eeg_cfg.reject_peak_to_peak
     window_n = int(round(task_cfg.window_s * sfreq))
 
     try:
+        logger.info(
+            "Starting offline model preparation: data_dir=%s, edf_glob=%s, window_s=%.3f, step_s=%.3f, "
+            "filter_band=[%.1f, %.1f], filter_context_s=%.3f",
+            task_cfg.data_dir,
+            task_cfg.edf_glob,
+            task_cfg.window_s,
+            task_cfg.window_step_s,
+            eeg_cfg.l_freq,
+            eeg_cfg.h_freq,
+            task_cfg.filter_context_s,
+        )
         cue.text = "Preparing model from offline EDF sessions..."
         status.text = (
             f"Loading data from {task_cfg.data_dir}\n"
             "Offline EDFs are standardized to the live stream convention: left-ear referenced, standard channel names,\n"
-            "then causally filtered and windowed exactly like the live stream."
+            "then causally filtered as full sessions before epoching/windowing to match live streaming."
         )
         detected.text = ""
         update_bar(0.0)
@@ -169,9 +212,59 @@ def run_task(fname: str):
         loso = evaluate_loso_sessions(dataset, model_cfg)
         classifier = make_mi_classifier(model_cfg)
         classifier.fit(dataset.X, dataset.y)
-        class_index = {int(c): i for i, c in enumerate(classifier.named_steps["clf"].classes_)}
-
+        classifier_classes = np.asarray(classifier.named_steps["clf"].classes_, dtype=int)
+        class_index = {int(c): i for i, c in enumerate(classifier_classes)}
+        if int(stim_cfg.left_code) not in class_index or int(stim_cfg.right_code) not in class_index:
+            raise RuntimeError(
+                f"Classifier classes {classifier_classes.tolist()} do not contain the expected "
+                f"left/right codes {[int(stim_cfg.left_code), int(stim_cfg.right_code)]}."
+            )
         counts = Counter(dataset.y.tolist())
+        logger.info(
+            "Offline dataset ready: files_used=%d/%d, trials=%d, windows=%d, class_counts=%s, "
+            "loso_mean=%.4f, loso_std=%.4f",
+            dataset.n_files_used,
+            dataset.n_files_found,
+            dataset.n_trials,
+            dataset.n_windows,
+            counts,
+            loso.mean_accuracy,
+            loso.std_accuracy,
+        )
+        logger.info(
+            "Classifier class order: classes=%s, class_index=%s, left_code=%d -> prob_index=%d, right_code=%d -> prob_index=%d",
+            classifier_classes.tolist(),
+            class_index,
+            int(stim_cfg.left_code),
+            class_index[int(stim_cfg.left_code)],
+            int(stim_cfg.right_code),
+            class_index[int(stim_cfg.right_code)],
+        )
+        train_pred = classifier.predict(dataset.X)
+        train_acc = float(np.mean(train_pred == dataset.y))
+        train_pred_counts = Counter(train_pred.tolist())
+        logger.info(
+            "Classifier fit sanity check: training_accuracy=%.4f, predicted_counts=%s",
+            train_acc,
+            train_pred_counts,
+        )
+        for code in classifier_classes.tolist():
+            class_mask = dataset.y == int(code)
+            if np.any(class_mask):
+                class_probs = classifier.predict_proba(dataset.X[class_mask])
+                mean_prob = np.mean(class_probs, axis=0)
+                prob_map = {
+                    int(cls): float(mean_prob[idx])
+                    for idx, cls in enumerate(classifier_classes.tolist())
+                }
+                logger.info(
+                    "Classifier fit sanity by true class: true_code=%d, n_windows=%d, mean_predicted_probs=%s",
+                    int(code),
+                    int(np.sum(class_mask)),
+                    prob_map,
+                )
+        for session_id, score in sorted(loso.session_scores.items()):
+            logger.info("LOSO session result: session=%d accuracy=%.4f", session_id, score)
         np.save(f"{fname}_mi_visualizer_windows.npy", dataset.X)
         np.save(f"{fname}_mi_visualizer_labels.npy", dataset.y)
         with open(f"{fname}_mi_visualizer_model.pkl", "wb") as fh:
@@ -213,6 +306,12 @@ def run_task(fname: str):
         p_vec = np.array([0.5, 0.5], dtype=np.float64)
         prediction_count = 0
         live_note = "warming up"
+        last_logged_visualized_state: tuple[float, float, float, int, str] | None = None
+        live_pull_count = 0
+        total_samples_appended = 0
+        samples_since_last_decode = 0
+        last_decoded_sample_total = -1
+        last_decoded_end_ts: float | None = None
 
         live_filter = StreamingIIRFilter.from_eeg_config(
             eeg_cfg=eeg_cfg,
@@ -223,6 +322,13 @@ def run_task(fname: str):
         keep_n = int(round((task_cfg.window_s + task_cfg.filter_context_s) * sfreq))
         stream_pull_s = max(0.20, task_cfg.live_update_interval_s * 2.0)
         last_live_ts: float | None = None
+        logger.info(
+            "Entering live loop: keep_n=%d, window_n=%d, stream_pull_s=%.3f, live_update_interval_s=%.3f",
+            keep_n,
+            window_n,
+            stream_pull_s,
+            task_cfg.live_update_interval_s,
+        )
 
         while session_clock.getTime() < task_cfg.live_duration_s:
             if "escape" in event.getKeys():
@@ -234,30 +340,134 @@ def run_task(fname: str):
                 mask = np.ones_like(ts, dtype=bool) if last_live_ts is None else (ts > float(last_live_ts))
                 if np.any(mask):
                     x_new = np.asarray(data[:, mask], dtype=np.float32)
+                    n_new = int(x_new.shape[1])
                     last_live_ts = float(ts[mask][-1])
                     x_new_filt = live_filter.process(x_new)
                     live_buffer = np.concatenate((live_buffer, x_new_filt), axis=1)
                     if live_buffer.shape[1] > keep_n:
                         live_buffer = live_buffer[:, -keep_n:]
+                    live_pull_count += 1
+                    total_samples_appended += n_new
+                    samples_since_last_decode += n_new
+                    raw_mean = float(np.mean(x_new))
+                    raw_std = float(np.std(x_new))
+                    filt_mean = float(np.mean(x_new_filt))
+                    filt_std = float(np.std(x_new_filt))
+                    start_ts = float(ts[mask][0])
+                    logger.info(
+                        "Live pull %d: appended=%d samples, total_appended=%d, ts_range=[%.6f, %.6f], "
+                        "buffer_samples=%d, raw_mean=%.3f, raw_std=%.3f, filt_mean=%.3f, filt_std=%.3f",
+                        live_pull_count,
+                        n_new,
+                        total_samples_appended,
+                        start_ts,
+                        last_live_ts,
+                        int(live_buffer.shape[1]),
+                        raw_mean,
+                        raw_std,
+                        filt_mean,
+                        filt_std,
+                    )
+                else:
+                    logger.warning(
+                        "Stream pull returned no strictly new timestamps: last_live_ts=%.6f, received_range=[%.6f, %.6f], "
+                        "received_samples=%d",
+                        float(last_live_ts) if last_live_ts is not None else -1.0,
+                        float(ts[0]),
+                        float(ts[-1]),
+                        int(ts.size),
+                    )
+            else:
+                logger.warning("Stream pull returned no data: data_size=%d, ts_len=%d", int(data.size), 0 if ts is None else len(ts))
 
             if pred_clock.getTime() >= task_cfg.live_update_interval_s:
                 pred_clock.reset()
-                if live_buffer.shape[1] >= window_n:
+                if live_buffer.shape[1] >= keep_n:
                     x_win = live_buffer[:, -window_n:]
+                    window_mean = float(np.mean(x_win))
+                    window_std = float(np.std(x_win))
+                    window_ptp = float(np.ptp(x_win, axis=-1).max())
+                    is_fresh_window = samples_since_last_decode > 0
+                    decode_end_ts = last_live_ts
                     if reject_thresh is None or float(np.ptp(x_win, axis=-1).max()) <= float(reject_thresh):
                         p_vec = classifier.predict_proba(x_win[np.newaxis, ...])[0]
+                        pred_code = int(classifier.predict(x_win[np.newaxis, ...])[0])
+                        prob_map = {
+                            int(cls): float(p_vec[idx])
+                            for idx, cls in enumerate(classifier_classes.tolist())
+                        }
                         prediction_count += 1
                         live_note = "updating"
+                        logger.info(
+                            "Decode %d: fresh_window=%s, new_samples_since_last_decode=%d, total_samples=%d, "
+                            "window_mean=%.3f, window_std=%.3f, window_ptp=%.3f, end_ts=%s, predicted_code=%d, probs_by_code=%s",
+                            prediction_count,
+                            is_fresh_window,
+                            samples_since_last_decode,
+                            total_samples_appended,
+                            window_mean,
+                            window_std,
+                            window_ptp,
+                            "None" if decode_end_ts is None else f"{decode_end_ts:.6f}",
+                            pred_code,
+                            prob_map,
+                        )
+                        if not is_fresh_window or last_decoded_sample_total == total_samples_appended:
+                            logger.warning(
+                                "Decode %d reused the previous live window: last_decoded_sample_total=%d, total_samples=%d, "
+                                "last_decoded_end_ts=%s, current_end_ts=%s",
+                                prediction_count,
+                                last_decoded_sample_total,
+                                total_samples_appended,
+                                "None" if last_decoded_end_ts is None else f"{last_decoded_end_ts:.6f}",
+                                "None" if decode_end_ts is None else f"{decode_end_ts:.6f}",
+                            )
+                        last_decoded_sample_total = total_samples_appended
+                        last_decoded_end_ts = decode_end_ts
+                        samples_since_last_decode = 0
                     else:
                         live_note = "artifact reject"
+                        logger.warning(
+                            "Decode skipped by artifact reject: new_samples_since_last_decode=%d, total_samples=%d, "
+                            "window_ptp=%.3f, threshold=%.3f, end_ts=%s",
+                            samples_since_last_decode,
+                            total_samples_appended,
+                            window_ptp,
+                            float(reject_thresh),
+                            "None" if decode_end_ts is None else f"{decode_end_ts:.6f}",
+                        )
                 else:
-                    needed_s = max(0.0, (window_n - live_buffer.shape[1]) / sfreq)
-                    live_note = f"warming up ({needed_s:.1f}s)"
+                    needed_s = max(0.0, (keep_n - live_buffer.shape[1]) / sfreq)
+                    live_note = f"warming up filter ({needed_s:.1f}s)"
+                    logger.info(
+                        "Decode waiting for warmup: buffer_samples=%d/%d, needed_s=%.3f, total_samples=%d",
+                        int(live_buffer.shape[1]),
+                        keep_n,
+                        needed_s,
+                        total_samples_appended,
+                    )
 
             left_p = float(p_vec[class_index[int(stim_cfg.left_code)]])
             right_p = float(p_vec[class_index[int(stim_cfg.right_code)]])
             signed_score = right_p - left_p
             update_bar(signed_score)
+            visualized_state = (
+                round(left_p, 6),
+                round(right_p, 6),
+                round(signed_score, 6),
+                int(prediction_count),
+                str(live_note),
+            )
+            if visualized_state != last_logged_visualized_state:
+                logger.info(
+                    "Visualized state: left_p=%.4f, right_p=%.4f, signed_score=%.4f, prediction_count=%d, note=%s",
+                    left_p,
+                    right_p,
+                    signed_score,
+                    prediction_count,
+                    live_note,
+                )
+                last_logged_visualized_state = visualized_state
             detected.text = (
                 f"{label_cfg.left_name}: {left_p:.2f}   "
                 f"{label_cfg.right_name}: {right_p:.2f}   "
@@ -276,8 +486,10 @@ def run_task(fname: str):
                 break
 
     except KeyboardInterrupt:
+        logger.info("Session interrupted by user.")
         print("\nSession interrupted.")
     finally:
+        logger.info("Shutting down live session.")
         try:
             stream.disconnect()
         except Exception:

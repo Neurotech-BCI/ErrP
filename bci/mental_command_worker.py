@@ -98,6 +98,16 @@ def filter_block(block: np.ndarray, eeg_cfg: EEGConfig, sfreq: float) -> np.ndar
     return filt.process(X)
 
 
+def filter_session(block: np.ndarray, eeg_cfg: EEGConfig, sfreq: float) -> np.ndarray:
+    """Causally filter a continuous session block from start to finish.
+
+    This is the closest offline analogue to the live stream path, where the
+    filter state is carried forward continuously rather than reset at each
+    epoch boundary.
+    """
+    return filter_block(block=block, eeg_cfg=eeg_cfg, sfreq=sfreq)
+
+
 # ---------------------------------------------------------------------------
 # Windowing
 # ---------------------------------------------------------------------------
@@ -281,7 +291,6 @@ def load_offline_mi_dataset(
             f"No EDF files matched {edf_glob!r} under {str(data_path)!r}"
         )
 
-    context_n = int(round(float(task_cfg.filter_context_s) * float(target_sfreq)))
     epoch_n = int(round(float(task_cfg.epoch_duration_s) * float(target_sfreq)))
     reject_thresh = eeg_cfg.reject_peak_to_peak
 
@@ -313,20 +322,23 @@ def load_offline_mi_dataset(
             )
 
         eeg_data = raw.get_data(picks=picks).astype(np.float32, copy=False)
+        eeg_data_filt = filter_session(
+            block=eeg_data,
+            eeg_cfg=eeg_cfg,
+            sfreq=float(target_sfreq),
+        )
         file_used = False
 
         for event_time_s, event_code in zip(event_times_s, events[:, 2]):
             if not stim_cfg.is_lr_code(int(event_code)):
                 continue
 
-            start = int(round((float(event_time_s) - float(task_cfg.filter_context_s)) * float(target_sfreq)))
-            stop = start + context_n + epoch_n
-            if start < 0 or stop > eeg_data.shape[1]:
+            start = int(round(float(event_time_s) * float(target_sfreq)))
+            stop = start + epoch_n
+            if start < 0 or stop > eeg_data_filt.shape[1]:
                 continue
 
-            segment = eeg_data[:, start:stop]
-            filtered = filter_block(segment, eeg_cfg=eeg_cfg, sfreq=float(target_sfreq))
-            epoch = filtered[:, context_n:context_n + epoch_n]
+            epoch = eeg_data_filt[:, start:stop]
             windows = split_windows(
                 block=epoch,
                 sfreq=float(target_sfreq),
