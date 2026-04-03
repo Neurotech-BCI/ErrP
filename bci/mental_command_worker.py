@@ -14,7 +14,7 @@ from sklearn.metrics import accuracy_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from config import EEGConfig, MentalCommandModelConfig, MentalCommandTaskConfig, StimConfig
+from config import EEGConfig, MentalCommandModelConfig, MentalCommandTaskConfig, StimConfig, LiveMITaskConfig
 
 
 # ---------------------------------------------------------------------------
@@ -425,4 +425,121 @@ def evaluate_loso_sessions(
         session_scores=session_scores,
         mean_accuracy=mean_accuracy,
         std_accuracy=std_accuracy,
+    )
+
+def load_dataset_for_live_task(
+    data_dir: str,
+    edf_glob: str,
+    eeg_cfg: EEGConfig,
+    task_cfg: LiveMITaskConfig,
+    stim_cfg: StimConfig,
+    target_sfreq: float,
+    target_channel_names: list[str] | tuple[str, ...],
+) -> OfflineMIDataset:
+    data_path = Path(data_dir).expanduser()
+    edf_paths = sorted(data_path.rglob(edf_glob))
+    if not edf_paths:
+        raise FileNotFoundError(
+            f"No EDF files matched {edf_glob!r} under {str(data_path)!r}"
+        )
+
+    epoch_n = int(round(float(task_cfg.epoch_duration_s) * float(target_sfreq)))
+    reject_thresh = eeg_cfg.reject_peak_to_peak
+
+    all_windows: list[np.ndarray] = []
+    all_labels: list[np.ndarray] = []
+    all_session_ids: list[np.ndarray] = []
+    n_trials = 0
+    n_files_used = 0
+
+    for session_id, edf_path in enumerate(edf_paths):
+        raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
+        raw = standardize_offline_raw(raw)
+        stim_channel = find_stim_channel(raw)
+
+        original_sfreq = float(raw.info["sfreq"])
+        events = mne.find_events(raw, stim_channel=stim_channel, min_duration=0.0, verbose=False)
+        if len(events) == 0:
+            continue
+        event_times_s = events[:, 0].astype(np.float64) / original_sfreq
+
+        if abs(original_sfreq - float(target_sfreq)) > 1e-6:
+            raw.resample(float(target_sfreq), npad="auto", verbose="ERROR")
+
+        picks, missing = resolve_channel_order(raw.ch_names, target_channel_names)
+        if missing:
+            raise RuntimeError(
+                f"EDF {edf_path} is missing required channels {missing}. "
+                f"Available channels: {raw.ch_names}"
+            )
+
+        eeg_data = raw.get_data(picks=picks).astype(np.float32, copy=False)
+        eeg_data *= float(task_cfg.offline_eeg_scale_to_match_live)
+        eeg_data_filt = filter_session(
+            block=eeg_data,
+            eeg_cfg=eeg_cfg,
+            sfreq=float(target_sfreq),
+        )
+        file_used = False
+
+        for event_time_s, event_code in zip(event_times_s, events[:, 2]):
+            if not stim_cfg.is_lr_code(int(event_code)):
+                continue
+
+            start = int(round(float(event_time_s) * float(target_sfreq)))
+            stop = start + epoch_n
+            if start < 0 or stop > eeg_data_filt.shape[1]:
+                continue
+
+            epoch = eeg_data_filt[:, start:stop]
+            
+            '''
+            windows = split_windows(
+                block=epoch,
+                sfreq=float(target_sfreq),
+                window_s=float(task_cfg.window_s),
+                step_s=float(task_cfg.window_step_s),
+            )
+            '''
+
+            windows = [epoch] # take the whole epoch as one window. alternatively set window length to be the same as the epoch length (3.0s)
+            if windows.shape[0] == 0:
+                continue
+
+            if reject_thresh is not None:
+                keep_mask = np.ptp(windows, axis=-1).max(axis=1) <= float(reject_thresh)
+                windows = windows[keep_mask]
+            if windows.shape[0] == 0:
+                continue
+
+            all_windows.append(windows)
+            all_labels.append(np.full(windows.shape[0], int(event_code), dtype=int))
+            all_session_ids.append(np.full(windows.shape[0], int(session_id), dtype=int))
+            n_trials += 1
+            file_used = True
+
+        if file_used:
+            n_files_used += 1
+
+    if not all_windows:
+        raise RuntimeError(
+            "No usable left/right windows were extracted from the EDF folder. "
+            "Check the path, trigger codes, and channel names."
+        )
+
+    X = np.concatenate(all_windows, axis=0).astype(np.float32, copy=False)
+    y = np.concatenate(all_labels, axis=0).astype(int, copy=False)
+    session_ids = np.concatenate(all_session_ids, axis=0).astype(int, copy=False)
+    return OfflineMIDataset(
+        X=X,
+        y=y,
+        session_ids=session_ids,
+        sfreq=float(target_sfreq),
+        channel_names=[str(name) for name in target_channel_names],
+        eeg_units=str(task_cfg.live_eeg_units),
+        offline_scale_applied=float(task_cfg.offline_eeg_scale_to_match_live),
+        n_files_found=len(edf_paths),
+        n_files_used=n_files_used,
+        n_trials=n_trials,
+        n_windows=int(X.shape[0]),
     )
