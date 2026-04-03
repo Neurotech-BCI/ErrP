@@ -1,8 +1,6 @@
-"""Offline motor-imagery calibration task for trigger-only data collection.
+"""Online motor-imagery task.
 
-This script mirrors the calibration phase from bci/psychopy_task.py but removes
-all live EEG/LSL processing. It only presents stimuli and sends LEFT/RIGHT
-trigger pulses to the trigger hub.
+This script combines the MI task with the live mental command task to create a intermediary hybrid. Training wheels.
 """
 from __future__ import annotations
 

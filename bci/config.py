@@ -150,6 +150,47 @@ class MentalCommandTaskConfig:
     # Visualization runtime.
     live_duration_s: float = 180.0
 
+@dataclass(frozen=True)
+class LiveMITaskConfig:
+    # Folder of cued MI EDF sessions used to fit the live model at startup.
+    data_dir: str = ""
+    edf_glob: str = "*.edf"
+
+    # MNE EDF readers typically return EEG in volts, while the live DSI/LSL
+    # stream is exposed in microvolts. Scale offline data into the live units
+    # before filtering and windowing so artifact thresholds and covariance
+    # structure are comparable online vs offline.
+    offline_eeg_scale_to_match_live: float = 1e6
+    live_eeg_units: str = "uV"
+
+    # Each cued MI execution epoch is 3 seconds long in the offline task.
+    epoch_duration_s: float = 3.0
+
+    # Sliding-window decoder definition used for both offline and online data.
+    window_s: float = 1.0
+    window_step_s: float = 0.50
+
+    # Amount of prior filtered history we require before the first live
+    # prediction. Offline sessions are now filtered continuously end-to-end,
+    # so this mainly controls live warmup and how much recent context is kept.
+    filter_context_s: float = 2.0
+
+    # Continuous live feedback settings.
+    live_update_interval_s: float = 0.50
+
+    # Visualization runtime.
+    # live_duration_s: float = 180.0
+
+    n_live_trials: int = 100
+    max_trials_before_break: int = 20
+
+    prep_duration_s: float = 3.0
+    execution_duration_s: float = 3.0
+    iti_duration_s: float = 3.0
+
+    fullscreen: bool = False
+    win_size: tuple[int, int] = (1200, 700)
+
 
 @dataclass(frozen=True)
 class MentalCommandModelConfig:
