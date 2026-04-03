@@ -203,13 +203,8 @@ def run_task(
 
     available = list(stream.info["ch_names"])
     model_ch_names, missing = resolve_channel_order(available, eeg_cfg.picks)
-    if len(model_ch_names) < 2:
-        event_key = canonicalize_channel_name(lsl_cfg.event_channels)
-        model_ch_names = [ch for ch in available if canonicalize_channel_name(ch) != event_key]
-    if len(model_ch_names) < 2:
-        raise RuntimeError(f"Need >=2 EEG channels, found: {available}")
     
-    stream.pick(available)
+    stream.pick(model_ch_names)
     stream.set_channel_types({lsl_cfg.event_channels: "stim"})
 
     epochs_online = EpochsStream(
@@ -280,6 +275,7 @@ def run_task(
 
     def wait_for_space() -> None:
         while True:
+            tick_recorder()
             draw_scene()
             win.flip()
             keys = event.getKeys()
