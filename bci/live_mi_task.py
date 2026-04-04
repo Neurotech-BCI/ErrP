@@ -28,7 +28,7 @@ from mental_command_worker import (
     StreamingIIRFilter,
     canonicalize_channel_name,
     evaluate_loso_sessions,
-    load_offline_mi_dataset,
+    load_dataset_for_live_task,
     make_mi_classifier,
     resolve_channel_order,
     filter_block
@@ -204,7 +204,6 @@ def run_task(
     available = list(stream.info["ch_names"])
     model_ch_names, missing = resolve_channel_order(available, eeg_cfg.picks)
     
-    stream.pick(model_ch_names)
     stream.set_channel_types({lsl_cfg.event_channels: "stim"})
 
     epochs_online = EpochsStream(
@@ -225,7 +224,7 @@ def run_task(
     trig.open()
 
     raw_csv_path = f"{fname}_raw.csv"
-    raw_recorder = RawCSVRecorder(filepath=raw_csv_path, ch_names=model_ch_names)
+    raw_recorder = RawCSVRecorder(filepath=raw_csv_path, ch_names=stream.ch_names)
     raw_recorder.start()
 
     def tick_recorder():
@@ -291,6 +290,7 @@ def run_task(
         epoch_data shape: (n_eeg_channels, n_samples).
         """
         clock = core.Clock()
+        initial_time = clock.getTime()
         while clock.getTime() < timeout_s:
             tick_recorder()
             draw_scene()
@@ -302,6 +302,7 @@ def run_task(
                 X_new = epochs_online.get_data(n_epochs=n_new, picks="eeg")
                 codes = epochs_online.events[-n_new:]
                 # Return the most recent left/right epoch
+                print(float(clock.getTime()) - float(initial_time))
                 return X_new[-1], int(codes[-1])
         return None, None
     
@@ -334,7 +335,7 @@ def run_task(
         )
         detected_text.text = ""
 
-        dataset = load_offline_mi_dataset(
+        dataset = load_dataset_for_live_task(
             data_dir=task_cfg.data_dir,
             edf_glob=task_cfg.edf_glob,
             eeg_cfg=eeg_cfg,
@@ -343,6 +344,7 @@ def run_task(
             target_sfreq=sfreq,
             target_channel_names=model_ch_names,
         )
+
         classes_present = {int(c) for c in np.unique(dataset.y)}
         expected_classes = {int(stim_cfg.left_code), int(stim_cfg.right_code)}
         if classes_present != expected_classes:
@@ -499,20 +501,19 @@ def run_task(
             draw_scene()
             win.flip()
             trig.pulse(y_true)
-
             wait_with_display(task_cfg.execution_duration_s)
 
             # Poll EpochsStream for the hardware-triggered epoch
-            epoch_poll_timeout = eeg_cfg.tmin + 1.5 # copied from psychopy_task, may need to be changed
-            epoch, code = poll_epoch(timeout_s=epoch_poll_timeout)
-            if epoch is None:
+            epoch_poll_timeout = eeg_cfg.tmax # copied from psychopy_task, may need to be changed
+            epoch_raw, code = poll_epoch(timeout_s=epoch_poll_timeout)
+            if epoch_raw is None:
                 print(f"Trial {live_idx + 1}: no epoch received (timeout)")
                 continue
             
             if code != y_true:
                 print(f"Trial {live_idx + 1}: code mismatch (expected {y_true}, got {code})")
 
-            epoch = filter_block(epoch, eeg_cfg, sfreq)
+            epoch = filter_block(epoch_raw, eeg_cfg, sfreq)
 
             if reject_thresh is not None and np.ptp(epoch, axis=-1).max() > reject_thresh:
                 print(f"Trial {live_idx + 1}: rejected (artifact)")
@@ -520,24 +521,13 @@ def run_task(
             elif reject_thresh is not None or float(np.ptp(epoch, axis=-1).max()) <= float(reject_thresh):
                 p_vec = classifier.predict_proba(epoch[np.newaxis, ...])[0]
                 pred_code = int(classifier.predict(epoch[np.newaxis, ...])[0])
-                prob_map = {
-                    int(cls): float(p_vec[idx])
-                    for idx, cls in enumerate(classifier_classes.tolist())
-                }
                 prediction_count += 1
 
             X_live.append(epoch)
             y_live.append(y_true)
 
-            left_p = float(p_vec[class_index[int(stim_cfg.left_code)]])
-            right_p = float(p_vec[class_index[int(stim_cfg.right_code)]])
-            signed_score = right_p - left_p
-
             # show predicted side
-            print(f"from line 540:")
-            print(p_vec)
-            print(pred_code)
-            pred_score = float(np.clip(signed_score, -1.0, 1.0))
+            print(f"model confidence in the classes {p_vec}")
             
             if (pred_code == y_true):
                 correct_count += 1
@@ -548,10 +538,10 @@ def run_task(
             cue_text.text = ""
             status_text.text = (
                     f"Live Trial {live_idx + 1}/{task_cfg.n_live_trials} | "
-                    f"Accuracy: {correct_count}/{live_idx}"
+                    f"Accuracy: {correct_count}/{live_idx + 1}"
                 )
             
-            wait_with_display(0.4)
+            wait_with_display(0.8)
             draw_scene()
             win.flip()
 

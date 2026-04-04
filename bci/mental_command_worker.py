@@ -493,16 +493,16 @@ def load_dataset_for_live_task(
 
             epoch = eeg_data_filt[:, start:stop]
             
-            '''
+            # '''
             windows = split_windows(
                 block=epoch,
                 sfreq=float(target_sfreq),
                 window_s=float(task_cfg.window_s),
                 step_s=float(task_cfg.window_step_s),
             )
-            '''
+            # '''
 
-            windows = [epoch] # take the whole epoch as one window. alternatively set window length to be the same as the epoch length (3.0s)
+            # windows = np.array([epoch]) # take the whole epoch as one window. alternatively set window length to be the same as the epoch length (3.0s)
             if windows.shape[0] == 0:
                 continue
 

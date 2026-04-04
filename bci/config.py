@@ -167,7 +167,7 @@ class LiveMITaskConfig:
     epoch_duration_s: float = 3.0
 
     # Sliding-window decoder definition used for both offline and online data.
-    window_s: float = 1.0
+    window_s: float = 3.0
     window_step_s: float = 0.50
 
     # Amount of prior filtered history we require before the first live
