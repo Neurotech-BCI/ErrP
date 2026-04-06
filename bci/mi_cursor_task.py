@@ -1,0 +1,587 @@
+from __future__ import annotations
+
+import logging
+import math
+import pickle
+from collections import Counter
+from datetime import datetime
+
+import numpy as np
+from psychopy import core, event, visual
+
+from mne_lsl.stream import StreamLSL
+
+from config import (
+    EEGConfig,
+    LSLConfig,
+    MentalCommandLabelConfig,
+    MentalCommandModelConfig,
+    MICursorTaskConfig,
+    StimConfig,
+)
+from mental_command_worker import (
+    StreamingIIRFilter,
+    canonicalize_channel_name,
+    evaluate_loso_sessions,
+    load_offline_mi_dataset,
+    make_mi_classifier,
+    resolve_channel_order,
+)
+
+
+def _make_task_logger(fname: str) -> logging.Logger:
+    logger = logging.getLogger(f"mi_cursor.{fname}")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    if logger.handlers:
+        return logger
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    file_handler = logging.FileHandler(f"{fname}_mi_cursor.log", mode="w")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    return logger
+
+
+def _sanitize_participant_name(raw_name: str) -> str:
+    cleaned = "_".join(raw_name.strip().lower().split())
+    cleaned = "".join(ch for ch in cleaned if ch.isalnum() or ch == "_")
+    return cleaned.strip("_")
+
+
+def _build_session_prefix(participant: str) -> str:
+    date_prefix = datetime.now().strftime("%m_%d_%y")
+    return f"{date_prefix}_{participant}_mi_cursor"
+
+
+def _prompt_session_prefix() -> str:
+    while True:
+        raw = input("Enter participant name: ")
+        participant = _sanitize_participant_name(raw)
+        if participant:
+            return _build_session_prefix(participant)
+        print("Participant name cannot be empty. Please try again.")
+
+
+def _wrap_angle(angle: float) -> float:
+    return float((angle + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+def _apply_deadband(value: float, deadband: float) -> float:
+    value = float(np.clip(value, -1.0, 1.0))
+    deadband = float(np.clip(deadband, 0.0, 0.99))
+    if abs(value) <= deadband:
+        return 0.0
+    scaled = (abs(value) - deadband) / (1.0 - deadband)
+    return float(math.copysign(scaled, value))
+
+
+def _sample_target(
+    rng: np.random.Generator,
+    x_limit: float,
+    y_limit: float,
+    min_distance: float,
+) -> np.ndarray:
+    for _ in range(1000):
+        candidate = np.array(
+            [
+                rng.uniform(-x_limit, x_limit),
+                rng.uniform(-y_limit, y_limit),
+            ],
+            dtype=np.float64,
+        )
+        if float(np.linalg.norm(candidate)) >= min_distance:
+            return candidate
+    raise RuntimeError("Failed to sample a valid target location.")
+
+
+def run_task(fname: str) -> None:
+    logger = _make_task_logger(fname)
+    lsl_cfg = LSLConfig()
+    stim_cfg = StimConfig()
+    label_cfg = MentalCommandLabelConfig()
+    task_cfg = MICursorTaskConfig()
+    model_cfg = MentalCommandModelConfig()
+    eeg_cfg = EEGConfig(
+        picks=("Pz", "F4", "C4", "P4", "P3", "C3", "F3"),
+        l_freq=8.0,
+        h_freq=30.0,
+        reject_peak_to_peak=150.0,
+    )
+
+    rng = np.random.default_rng()
+
+    stream = StreamLSL(
+        bufsize=60.0,
+        name=lsl_cfg.name,
+        stype=lsl_cfg.stype,
+        source_id=lsl_cfg.source_id,
+    )
+    stream.connect(acquisition_delay=0.001, processing_flags="all")
+    logger.info("Connected to LSL stream: info=%s", stream.info)
+
+    available = list(stream.info["ch_names"])
+    model_ch_names, missing = resolve_channel_order(available, eeg_cfg.picks)
+    if len(model_ch_names) < 2:
+        event_key = canonicalize_channel_name(lsl_cfg.event_channels)
+        model_ch_names = [ch for ch in available if canonicalize_channel_name(ch) != event_key]
+    if len(model_ch_names) < 2:
+        raise RuntimeError(f"Need >=2 EEG channels, found: {available}")
+
+    stream.pick(model_ch_names)
+    sfreq = float(stream.info["sfreq"])
+    stream_ch_names = list(stream.info["ch_names"])
+    logger.info(
+        "Using live EEG channels: sfreq=%.3f, selected=%s, missing_configured=%s",
+        sfreq,
+        stream_ch_names,
+        missing,
+    )
+
+    classifier = None
+    dataset = None
+    class_index: dict[int, int] | None = None
+
+    win = visual.Window(
+        size=task_cfg.win_size,
+        color=(-0.08, -0.08, -0.08),
+        units="norm",
+        fullscr=task_cfg.fullscreen,
+    )
+
+    white = (0.90, 0.90, 0.90)
+    target_color = (0.96, 0.78, 0.24)
+    cursor_color = (0.38, 0.84, 0.95)
+    accent = (0.88, 0.92, 0.96)
+    success_color = (0.38, 0.92, 0.56)
+
+    arena_limit_x = 1.0 - float(task_cfg.arena_margin) - float(task_cfg.cursor_radius)
+    arena_limit_y = 1.0 - float(task_cfg.arena_margin) - float(task_cfg.cursor_radius)
+    target_limit_x = 1.0 - float(task_cfg.arena_margin) - float(task_cfg.target_radius)
+    target_limit_y = 1.0 - float(task_cfg.arena_margin) - float(task_cfg.target_radius)
+
+    title = visual.TextStim(win, text="Motor Imagery Cursor Control", pos=(0, 0.90), height=0.055, color=white)
+    cue = visual.TextStim(win, text="", pos=(0, 0.76), height=0.055, color=white)
+    status = visual.TextStim(win, text="", pos=(0, -0.91), height=0.040, color=(0.84, 0.84, 0.84))
+    info = visual.TextStim(win, text="", pos=(0, -0.82), height=0.040, color=accent)
+    arena_outline = visual.Rect(
+        win,
+        width=2.0 - 2.0 * task_cfg.arena_margin,
+        height=2.0 - 2.0 * task_cfg.arena_margin,
+        pos=(0, 0),
+        lineColor=(0.28, 0.28, 0.28),
+        fillColor=None,
+        lineWidth=1.5,
+    )
+    target = visual.Circle(
+        win,
+        radius=task_cfg.target_radius,
+        edges=64,
+        pos=(0.0, 0.0),
+        fillColor=target_color,
+        lineColor=white,
+        lineWidth=1.5,
+    )
+    cursor = visual.Circle(
+        win,
+        radius=task_cfg.cursor_radius,
+        edges=64,
+        pos=(0.0, 0.0),
+        fillColor=cursor_color,
+        lineColor=white,
+        lineWidth=1.5,
+    )
+    heading_line = visual.Line(
+        win,
+        start=(0.0, 0.0),
+        end=(0.0, 0.08),
+        lineColor=white,
+        lineWidth=3.0,
+    )
+
+    cursor_pos = np.zeros(2, dtype=np.float64)
+    heading_rad = math.pi / 2.0
+    steering_state = 0.0
+    target_pos = np.zeros(2, dtype=np.float64)
+
+    def _update_cursor_visual() -> None:
+        cursor.pos = (float(cursor_pos[0]), float(cursor_pos[1]))
+        nose_len = float(task_cfg.cursor_radius) * 2.3
+        heading_line.start = (float(cursor_pos[0]), float(cursor_pos[1]))
+        heading_line.end = (
+            float(cursor_pos[0] + math.cos(heading_rad) * nose_len),
+            float(cursor_pos[1] + math.sin(heading_rad) * nose_len),
+        )
+
+    def _draw_frame() -> None:
+        arena_outline.draw()
+        target.draw()
+        heading_line.draw()
+        cursor.draw()
+        title.draw()
+        cue.draw()
+        info.draw()
+        status.draw()
+        win.flip()
+
+    def _reset_trial_state() -> None:
+        nonlocal cursor_pos, heading_rad, steering_state
+        cursor_pos = np.zeros(2, dtype=np.float64)
+        heading_rad = math.pi / 2.0
+        steering_state = 0.0
+        _update_cursor_visual()
+
+    logger.info(
+        "Starting offline model preparation: data_dir=%s, edf_glob=%s, window_s=%.3f, step_s=%.3f, "
+        "filter_band=[%.1f, %.1f], filter_context_s=%.3f, live_update_interval_s=%.3f",
+        task_cfg.data_dir,
+        task_cfg.edf_glob,
+        task_cfg.window_s,
+        task_cfg.window_step_s,
+        eeg_cfg.l_freq,
+        eeg_cfg.h_freq,
+        task_cfg.filter_context_s,
+        task_cfg.live_update_interval_s,
+    )
+
+    cue.text = "Preparing model from offline EDF sessions..."
+    info.text = "Using the same EDF preprocessing and sliding-window decoder as the live MI visualizer."
+    status.text = "Please wait..."
+    _draw_frame()
+
+    try:
+        dataset = load_offline_mi_dataset(
+            data_dir=task_cfg.data_dir,
+            edf_glob=task_cfg.edf_glob,
+            eeg_cfg=eeg_cfg,
+            task_cfg=task_cfg,
+            stim_cfg=stim_cfg,
+            target_sfreq=sfreq,
+            target_channel_names=model_ch_names,
+        )
+        classes_present = {int(c) for c in np.unique(dataset.y)}
+        expected_classes = {int(stim_cfg.left_code), int(stim_cfg.right_code)}
+        if classes_present != expected_classes:
+            raise RuntimeError(
+                f"Training data must contain both left/right classes. "
+                f"Found {sorted(classes_present)}, expected {sorted(expected_classes)}."
+            )
+
+        loso = evaluate_loso_sessions(dataset, model_cfg)
+        classifier = make_mi_classifier(model_cfg)
+        classifier.fit(dataset.X, dataset.y)
+        classifier_classes = np.asarray(classifier.named_steps["clf"].classes_, dtype=int)
+        class_index = {int(c): i for i, c in enumerate(classifier_classes)}
+        if int(stim_cfg.left_code) not in class_index or int(stim_cfg.right_code) not in class_index:
+            raise RuntimeError(
+                f"Classifier classes {classifier_classes.tolist()} do not contain the expected "
+                f"left/right codes {[int(stim_cfg.left_code), int(stim_cfg.right_code)]}."
+            )
+        counts = Counter(dataset.y.tolist())
+        logger.info(
+            "Offline dataset ready: files_used=%d/%d, trials=%d, windows=%d, class_counts=%s, "
+            "loso_mean=%.4f, loso_std=%.4f, eeg_units=%s, offline_scale_applied=%.3f",
+            dataset.n_files_used,
+            dataset.n_files_found,
+            dataset.n_trials,
+            dataset.n_windows,
+            counts,
+            loso.mean_accuracy,
+            loso.std_accuracy,
+            dataset.eeg_units,
+            dataset.offline_scale_applied,
+        )
+        np.save(f"{fname}_mi_cursor_windows.npy", dataset.X)
+        np.save(f"{fname}_mi_cursor_labels.npy", dataset.y)
+        with open(f"{fname}_mi_cursor_model.pkl", "wb") as fh:
+            pickle.dump(classifier, fh)
+
+        cue.text = "Model ready"
+        info.text = (
+            f"LOSO mean={loso.mean_accuracy:.3f}  std={loso.std_accuracy:.3f}  "
+            f"Window={task_cfg.window_s:.1f}s  Update={task_cfg.live_update_interval_s:.2f}s"
+        )
+        status.text = (
+            "Press SPACE to start a target trial.\n"
+            f"Use {label_cfg.left_name}/{label_cfg.right_name} motor imagery to steer the cursor. ESC to quit."
+        )
+        _reset_trial_state()
+        target_pos = _sample_target(
+            rng=rng,
+            x_limit=target_limit_x,
+            y_limit=target_limit_y,
+            min_distance=float(task_cfg.target_min_distance_from_center),
+        )
+        target.pos = (float(target_pos[0]), float(target_pos[1]))
+        _draw_frame()
+    except Exception:
+        try:
+            stream.disconnect()
+        except Exception:
+            pass
+        try:
+            win.close()
+        except Exception:
+            pass
+        raise
+
+    pred_clock = core.Clock()
+    live_filter = StreamingIIRFilter.from_eeg_config(
+        eeg_cfg=eeg_cfg,
+        sfreq=sfreq,
+        n_channels=len(model_ch_names),
+    )
+    live_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
+    keep_n = int(round((task_cfg.window_s + task_cfg.filter_context_s) * sfreq))
+    window_n = int(round(task_cfg.window_s * sfreq))
+    stream_pull_s = max(0.10, task_cfg.live_update_interval_s * 2.0)
+    reject_thresh = eeg_cfg.reject_peak_to_peak
+    last_live_ts: float | None = None
+
+    prediction_count = 0
+    left_prob = 0.5
+    right_prob = 0.5
+    raw_command = 0.0
+    ema_command = 0.0
+    live_note = "warming up"
+
+    def _poll_live_decoder() -> None:
+        nonlocal last_live_ts, live_buffer, prediction_count
+        nonlocal left_prob, right_prob, raw_command, ema_command, live_note
+
+        data, ts = stream.get_data(winsize=stream_pull_s, picks="all")
+        if data.size > 0 and ts is not None and len(ts) > 0:
+            ts_arr = np.asarray(ts)
+            mask = np.ones_like(ts_arr, dtype=bool) if last_live_ts is None else (ts_arr > float(last_live_ts))
+            if np.any(mask):
+                x_new = np.asarray(data[:, mask], dtype=np.float32)
+                last_live_ts = float(ts_arr[mask][-1])
+                x_new_filt = live_filter.process(x_new)
+                live_buffer = np.concatenate((live_buffer, x_new_filt), axis=1)
+                if live_buffer.shape[1] > keep_n:
+                    live_buffer = live_buffer[:, -keep_n:]
+
+        if pred_clock.getTime() < task_cfg.live_update_interval_s:
+            return
+
+        pred_clock.reset()
+        if live_buffer.shape[1] < keep_n:
+            needed_s = max(0.0, (keep_n - live_buffer.shape[1]) / sfreq)
+            raw_command = 0.0
+            ema_command *= 0.95
+            live_note = f"warming up ({needed_s:.1f}s)"
+            return
+
+        x_win = live_buffer[:, -window_n:]
+        max_ptp = float(np.ptp(x_win, axis=-1).max())
+        if reject_thresh is not None and max_ptp > float(reject_thresh):
+            raw_command = 0.0
+            ema_command *= 0.85
+            live_note = "artifact reject"
+            return
+
+        p_vec = classifier.predict_proba(x_win[np.newaxis, ...])[0]
+        left_prob = float(p_vec[class_index[int(stim_cfg.left_code)]])
+        right_prob = float(p_vec[class_index[int(stim_cfg.right_code)]])
+        raw_command = float(np.clip(right_prob - left_prob, -1.0, 1.0))
+        alpha = float(np.clip(task_cfg.command_ema_alpha, 0.0, 1.0))
+        if prediction_count == 0:
+            ema_command = raw_command
+        else:
+            ema_command = (1.0 - alpha) * ema_command + alpha * raw_command
+        prediction_count += 1
+        live_note = "tracking"
+
+        if prediction_count % 20 == 0:
+            logger.info(
+                "Decode %d: left_p=%.4f, right_p=%.4f, raw_command=%.4f, ema_command=%.4f",
+                prediction_count,
+                left_prob,
+                right_prob,
+                raw_command,
+                ema_command,
+            )
+
+    def _wait_for_space(message: str) -> None:
+        cue.text = message
+        while True:
+            _poll_live_decoder()
+            info.text = (
+                f"{label_cfg.left_name}: {left_prob:.2f}   {label_cfg.right_name}: {right_prob:.2f}   "
+                f"cmd={ema_command:+.2f}   {live_note}"
+            )
+            _draw_frame()
+            keys = event.getKeys()
+            if "escape" in keys:
+                raise KeyboardInterrupt
+            if "space" in keys:
+                return
+
+    def _settle_before_trial() -> None:
+        settle_clock = core.Clock()
+        while settle_clock.getTime() < task_cfg.trial_start_delay_s:
+            if "escape" in event.getKeys():
+                raise KeyboardInterrupt
+            _poll_live_decoder()
+            remaining = max(0.0, task_cfg.trial_start_delay_s - settle_clock.getTime())
+            cue.text = f"Trial starting in {remaining:.1f}s"
+            info.text = (
+                f"{label_cfg.left_name}: {left_prob:.2f}   {label_cfg.right_name}: {right_prob:.2f}   "
+                f"cmd={ema_command:+.2f}   {live_note}"
+            )
+            _draw_frame()
+
+    trial_results: list[dict[str, float | int | tuple[float, float]]] = []
+    completed_trials = 0
+    last_frame_t = core.getTime()
+
+    try:
+        while True:
+            _reset_trial_state()
+            target.fillColor = target_color
+            target_pos = _sample_target(
+                rng=rng,
+                x_limit=target_limit_x,
+                y_limit=target_limit_y,
+                min_distance=float(task_cfg.target_min_distance_from_center),
+            )
+            target.pos = (float(target_pos[0]), float(target_pos[1]))
+            status.text = (
+                f"Trials completed: {completed_trials}\n"
+                "Press SPACE to start the next target. ESC to stop."
+            )
+            _wait_for_space("Reach the target with left/right motor imagery")
+
+            _reset_trial_state()
+            ema_command = 0.0
+            raw_command = 0.0
+            left_prob = 0.5
+            right_prob = 0.5
+            live_note = "settling"
+            _settle_before_trial()
+
+            trial_clock = core.Clock()
+            trial_pred_start = prediction_count
+            path_length = 0.0
+            mean_abs_command_sum = 0.0
+            mean_raw_command_sum = 0.0
+            command_samples = 0
+            last_frame_t = core.getTime()
+
+            while True:
+                if "escape" in event.getKeys():
+                    raise KeyboardInterrupt
+
+                _poll_live_decoder()
+
+                now_t = core.getTime()
+                dt = float(np.clip(now_t - last_frame_t, 1e-4, 0.05))
+                last_frame_t = now_t
+
+                command_drive = _apply_deadband(ema_command, float(task_cfg.command_deadband))
+                if task_cfg.steering_time_constant_s <= 1e-6:
+                    steering_state = command_drive
+                else:
+                    blend = float(np.clip(dt / task_cfg.steering_time_constant_s, 0.0, 1.0))
+                    steering_state += (command_drive - steering_state) * blend
+
+                heading_rad = _wrap_angle(
+                    heading_rad + math.radians(task_cfg.max_turn_rate_deg_s) * steering_state * dt
+                )
+
+                proposed_pos = cursor_pos + np.array(
+                    [
+                        math.cos(heading_rad) * task_cfg.forward_speed_norm_s * dt,
+                        math.sin(heading_rad) * task_cfg.forward_speed_norm_s * dt,
+                    ],
+                    dtype=np.float64,
+                )
+                clamped_pos = np.array(
+                    [
+                        np.clip(proposed_pos[0], -arena_limit_x, arena_limit_x),
+                        np.clip(proposed_pos[1], -arena_limit_y, arena_limit_y),
+                    ],
+                    dtype=np.float64,
+                )
+                path_length += float(np.linalg.norm(clamped_pos - cursor_pos))
+                cursor_pos[:] = clamped_pos
+                _update_cursor_visual()
+
+                mean_abs_command_sum += abs(command_drive)
+                mean_raw_command_sum += raw_command
+                command_samples += 1
+
+                distance_to_target = float(np.linalg.norm(cursor_pos - target_pos))
+                cue.text = f"Trial {completed_trials + 1}"
+                info.text = (
+                    f"{label_cfg.left_name}: {left_prob:.2f}   {label_cfg.right_name}: {right_prob:.2f}   "
+                    f"raw={raw_command:+.2f}   ema={ema_command:+.2f}   steer={steering_state:+.2f}"
+                )
+                status.text = (
+                    f"time={trial_clock.getTime():.1f}s   "
+                    f"distance={distance_to_target:.2f}   "
+                    f"updates={prediction_count - trial_pred_start}   {live_note}"
+                )
+                _draw_frame()
+
+                if distance_to_target <= float(task_cfg.cursor_radius + task_cfg.target_radius):
+                    completed_trials += 1
+                    target.fillColor = success_color
+                    trial_duration = float(trial_clock.getTime())
+                    result = {
+                        "trial": int(completed_trials),
+                        "target_x": float(target_pos[0]),
+                        "target_y": float(target_pos[1]),
+                        "duration_s": trial_duration,
+                        "path_length": float(path_length),
+                        "mean_abs_command": float(mean_abs_command_sum / max(command_samples, 1)),
+                        "mean_raw_command": float(mean_raw_command_sum / max(command_samples, 1)),
+                        "prediction_updates": int(prediction_count - trial_pred_start),
+                    }
+                    trial_results.append(result)
+                    logger.info("Trial complete: %s", result)
+
+                    hit_clock = core.Clock()
+                    while hit_clock.getTime() < task_cfg.post_hit_pause_s:
+                        if "escape" in event.getKeys():
+                            raise KeyboardInterrupt
+                        _poll_live_decoder()
+                        cue.text = "Target reached"
+                        info.text = (
+                            f"time={trial_duration:.1f}s   path={path_length:.2f}   "
+                            f"updates={prediction_count - trial_pred_start}"
+                        )
+                        status.text = "Press SPACE for the next target after the pause."
+                        _draw_frame()
+                    break
+
+        # Unreachable because the loop exits via KeyboardInterrupt.
+    except KeyboardInterrupt:
+        logger.info("Session interrupted by user.")
+    finally:
+        if classifier is not None and trial_results:
+            with open(f"{fname}_mi_cursor_trials.pkl", "wb") as fh:
+                pickle.dump(trial_results, fh)
+            logger.info("Saved %d completed trials to %s_mi_cursor_trials.pkl", len(trial_results), fname)
+        try:
+            stream.disconnect()
+        except Exception:
+            pass
+        try:
+            win.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    fname = _prompt_session_prefix()
+    print(f"[SESSION] Using filename prefix: {fname}")
+    run_task(fname=fname)

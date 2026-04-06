@@ -150,6 +150,51 @@ class MentalCommandTaskConfig:
     # Visualization runtime.
     live_duration_s: float = 180.0
 
+
+@dataclass(frozen=True)
+class MICursorTaskConfig:
+    # Folder of cued MI EDF sessions used to fit the live model at startup.
+    data_dir: str = ""
+    edf_glob: str = "*.edf"
+
+    # Match offline EDF units to the live stream before preprocessing.
+    offline_eeg_scale_to_match_live: float = 1e6
+    live_eeg_units: str = "uV"
+
+    # Each cued MI execution epoch is 3 seconds long in the offline task.
+    epoch_duration_s: float = 3.0
+
+    # Sliding-window decoder definition used for both offline and online data.
+    window_s: float = 1.0
+    window_step_s: float = 0.50
+
+    # Amount of prior filtered history required before the first live prediction.
+    filter_context_s: float = 2.0
+
+    # Decoder update cadence.
+    live_update_interval_s: float = 0.10
+
+    # Window / display settings.
+    fullscreen: bool = False
+    win_size: tuple[int, int] = (1280, 760)
+    arena_margin: float = 0.06
+
+    # Trial flow.
+    trial_start_delay_s: float = 0.75
+    post_hit_pause_s: float = 0.40
+
+    # Cursor / target geometry in PsychoPy "norm" units.
+    cursor_radius: float = 0.028
+    target_radius: float = 0.055
+    target_min_distance_from_center: float = 0.35
+
+    # Steering control dynamics.
+    forward_speed_norm_s: float = 0.24
+    max_turn_rate_deg_s: float = 115.0
+    command_ema_alpha: float = 0.28
+    command_deadband: float = 0.10
+    steering_time_constant_s: float = 0.35
+
 @dataclass(frozen=True)
 class LiveMITaskConfig:
     # Folder of cued MI EDF sessions used to fit the live model at startup.
