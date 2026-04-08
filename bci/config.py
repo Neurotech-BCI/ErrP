@@ -165,34 +165,62 @@ class MICursorTaskConfig:
     epoch_duration_s: float = 3.0
 
     # Sliding-window decoder definition used for both offline and online data.
+    # Increase `window_s` for stabler but less responsive predictions.
+    # Decrease `window_s` for faster but noisier control.
     window_s: float = 1.0
+    # Increase `window_step_s` to create fewer, less redundant offline windows.
+    # Decrease `window_step_s` to sample training windows more densely.
     window_step_s: float = 0.50
 
     # Amount of prior filtered history required before the first live prediction.
     filter_context_s: float = 2.0
 
     # Decoder update cadence.
+    # Increase `live_update_interval_s` for fewer, calmer updates.
+    # Decrease it for more responsive but potentially twitchier control.
     live_update_interval_s: float = 0.10
 
     # Window / display settings.
     fullscreen: bool = False
     win_size: tuple[int, int] = (1280, 760)
+    # Increase `arena_margin` to shrink the playable area and keep objects farther from the edges.
+    # Decrease it to give the cursor more room to move.
     arena_margin: float = 0.06
 
     # Trial flow.
+    # Increase `trial_start_delay_s` to give the decoder more time to settle before motion starts.
+    # Decrease it to start trials more quickly.
     trial_start_delay_s: float = 0.75
+    # Increase `post_hit_pause_s` for clearer target-hit feedback between trials.
+    # Decrease it to speed up the overall task pace.
     post_hit_pause_s: float = 0.40
 
     # Cursor / target geometry in PsychoPy "norm" units.
+    # Increase `cursor_radius` to make the cursor easier to see and collisions easier.
+    # Decrease it for more precise but harder control.
     cursor_radius: float = 0.028
+    # Increase `target_radius` to make targets easier to hit.
+    # Decrease it to make the task more demanding.
     target_radius: float = 0.055
+    # Increase `target_min_distance_from_center` to force larger steering movements.
+    # Decrease it to allow easier, nearer targets.
     target_min_distance_from_center: float = 0.35
 
     # Steering control dynamics.
+    # Increase `forward_speed_norm_s` to make the task faster and harder.
+    # Decrease it to give the user more time to steer.
     forward_speed_norm_s: float = 0.24
+    # Increase `max_turn_rate_deg_s` for tighter turns and more agility.
+    # Decrease it for gentler, more stable arcs.
     max_turn_rate_deg_s: float = 115.0
+    # Increase `command_ema_alpha` for faster but noisier command updates.
+    # Decrease it for smoother but laggier control.
     command_ema_alpha: float = 0.28
+    # Increase `command_deadband` to suppress small noisy turns.
+    # Decrease it to make weak intent move the cursor more readily.
     command_deadband: float = 0.10
+    # Increase `steering_time_constant_s` for slower, smoother steering changes.
+    # Decrease it for quicker but potentially more abrupt steering.
     steering_time_constant_s: float = 0.35
 
 @dataclass(frozen=True)
