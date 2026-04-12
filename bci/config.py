@@ -323,6 +323,97 @@ class LiveMITaskConfig:
     fullscreen: bool = False
     win_size: tuple[int, int] = (1200, 700)
 
+@dataclass(frozen=True)
+class KnobTaskConfig:
+    # Folder of cued MI EDF sessions used to fit the live model at startup.
+    data_dir: str = ""
+    edf_glob: str = "*.edf"
+
+    # Match offline EDF units to the live stream before preprocessing.
+    offline_eeg_scale_to_match_live: float = 1e6
+    live_eeg_units: str = "uV"
+
+    # Each cued MI execution epoch is 3 seconds long in the offline task.
+    epoch_duration_s: float = 3.0
+
+    # Sliding-window decoder definition used for both offline and online data.
+    # Increase `window_s` for stabler but less responsive predictions.
+    # Decrease `window_s` for faster but noisier control.
+    window_s: float = 1.0
+    # Increase `window_step_s` to create fewer, less redundant offline windows.
+    # Decrease `window_step_s` to sample training windows more densely.
+    window_step_s: float = 0.50
+
+    # Amount of prior filtered history required before the first live prediction.
+    filter_context_s: float = 2.0
+
+    # Decoder update cadence.
+    # Increase `live_update_interval_s` for fewer, calmer updates.
+    # Decrease it for more responsive but potentially twitchier control.
+    live_update_interval_s: float = 0.10
+
+    # If True, collect a short relaxed baseline at startup and add it as a
+    # third REST class to the classifier.
+    enable_online_rest_calibration: bool = False
+    # Internal label used for the optional REST class. This is only for the
+    # classifier and is never sent as a hardware trigger.
+    rest_class_code: int = 99
+    # Duration of the relaxed baseline collection before the live task.
+    rest_calibration_duration_s: float = 20.0
+
+    # If True, collect short live LEFT/RIGHT sustained MI blocks at startup
+    # and add them as one additional session in LOSO and final fitting.
+    enable_online_lr_calibration: bool = False
+    # Number of sustained live calibration blocks to collect per class.
+    online_lr_calibration_reps_per_class: int = 4
+    # Preparation time before each live LEFT/RIGHT calibration block.
+    online_lr_calibration_prep_s: float = 2.0
+    # Sustained imagery duration for each live LEFT/RIGHT calibration block.
+    online_lr_calibration_hold_s: float = 8.0
+    # Rest interval between live LEFT/RIGHT calibration blocks.
+    online_lr_calibration_iti_s: float = 2.0
+
+    # If True, add a fixed signed offset to the live right-left command.
+    enable_live_bias_offset: bool = False
+    # Signed command offset added to (p_right - p_left). Positive favors
+    # RIGHT, negative favors LEFT.
+    live_bias_offset: float = 0.0
+
+    # Window / display settings.
+    fullscreen: bool = False
+    win_size: tuple[int, int] = (1280, 760)
+    # Increase `arena_margin` to shrink the playable area and keep objects farther from the edges.
+    # Decrease it to give the cursor more room to move.
+    arena_margin: float = 0.06
+
+    # Trial flow.
+    # Increase `trial_start_delay_s` to give the decoder more time to settle before motion starts.
+    # Decrease it to start trials more quickly.
+    trial_start_delay_s: float = 0.75
+    # Increase `post_hit_pause_s` for clearer target-hit feedback between trials.
+    # Decrease it to speed up the overall task pace.
+    post_hit_pause_s: float = 0.40
+
+    # parameters specialized for this task
+    knob_radius: float = 20.0
+    rotation_speed: float = 0.05 # this is just a multiplier
+    min_angular_distance: float = 0.5 # in radians. 0.5 rad is around 28.6 degrees. distances between target region centers in adjacent trials.
+    target_region_radius: float = 0.2 # also in radians. target region will be 2*target_region_radius in size
+    start_angle: float = 0 # ie start facing up / 12 o'clock
+
+    # Increase `max_turn_rate_deg_s` for tighter turns and more agility.
+    # Decrease it for gentler, more stable arcs.
+    max_turn_rate_deg_s: float = 115.0
+    # Increase `command_ema_alpha` for faster but noisier command updates.
+    # Decrease it for smoother but laggier control.
+    command_ema_alpha: float = 0.28
+    # Increase `command_deadband` to suppress small noisy turns.
+    # Decrease it to make weak intent move the cursor more readily.
+    command_deadband: float = 0.10
+    # Increase `steering_time_constant_s` for slower, smoother steering changes.
+    # Decrease it for quicker but potentially more abrupt steering.
+    steering_time_constant_s: float = 0.35
+
 
 @dataclass(frozen=True)
 class MentalCommandModelConfig:
