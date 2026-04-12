@@ -105,7 +105,6 @@ def create_target_region(start_angle_rad: float, end_angle_rad: float, radius: f
     
     for i in range(num_points):
         angle = start_angle_rad + i * step
-        # math for PsychoPy's coordinate system (0=Up, clockwise)
         x = radius * math.cos(angle)
         y = radius * math.sin(angle)
         vertices.append((x, y))
@@ -637,7 +636,7 @@ def run_task(fname: str) -> None:
                 info.text = "   ".join(parts)
                 status.text = (
                     f"time={trial_clock.getTime():.1f}s   "
-                    f"distance={distance_to_target_region:.2f}   "
+                    f"distance={angular_dist_to_center:.2f}   "
                     f"updates={prediction_count - trial_pred_start}   {live_note}"
                 )
                 _draw_frame()
