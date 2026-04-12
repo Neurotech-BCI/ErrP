@@ -395,7 +395,7 @@ class KnobTaskConfig:
     post_hit_pause_s: float = 0.40
 
     # parameters specialized for this task
-    knob_radius: float = 20.0
+    knob_radius: float = 0.02
     rotation_speed: float = 0.05 # this is just a multiplier
     min_angular_distance: float = 0.5 # in radians. 0.5 rad is around 28.6 degrees. distances between target region centers in adjacent trials.
     target_region_radius: float = 0.2 # also in radians. target region will be 2*target_region_radius in size

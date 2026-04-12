@@ -89,11 +89,12 @@ def _apply_deadband(value: float, deadband: float) -> float:
 def _sample_target( # altered to generate a target region for the knob instead
     rng: np.random.Generator,
     min_distance: float,
-    radius: float
+    radius: float,
+    prev_target: float
 ) -> np.ndarray:
     for _ in range(1000):
         candidate = rng.uniform(0, 2*np.pi)
-        if float(np.linalg.norm(candidate)) >= min_distance:
+        if float(np.linalg.norm(candidate - prev_target)) >= min_distance:
             return [candidate - radius, candidate + radius]
     raise RuntimeError("Failed to sample a valid target location.")
 
@@ -104,8 +105,8 @@ def create_target_region(start_angle_rad: float, end_angle_rad: float, radius: f
     for i in range(num_points):
         angle = start_angle_rad + i * step
         # math for PsychoPy's coordinate system (0=Up, clockwise)
-        x = radius * math.sin(angle)
-        y = radius * math.cos(angle)
+        x = radius * math.cos(angle)
+        y = radius * math.sin(angle)
         vertices.append((x, y))
         
     return vertices
@@ -206,6 +207,7 @@ def run_task(fname: str) -> None:
 
     heading_rad = task_cfg.start_angle
     steering_state = 0.0
+    target_pos = 0.0
 
     def _update_knob_visual() -> None:
         nose_len = float(task_cfg.knob_radius) * 1.2 # the 1.2 can be altered, I just made it up
@@ -405,7 +407,8 @@ def run_task(fname: str) -> None:
         target_pos = _sample_target(
             rng=rng,
             min_distance=float(task_cfg.min_angular_distance),
-            radius=float(task_cfg.knob_radius)
+            radius=float(task_cfg.knob_radius),
+            prev_target=target_pos
         )
 
         target_region_vertices = create_target_region(target_pos[0], target_pos[1], task_cfg.knob_radius, num_points=100) # change this 100 if necessary
@@ -557,7 +560,8 @@ def run_task(fname: str) -> None:
             target_pos = _sample_target(
                 rng=rng,
                 min_distance=float(task_cfg.min_angular_distance),
-                radius=task_cfg.knob_radius
+                radius=task_cfg.knob_radius,
+                prev_target=float((target_pos[0] + target_pos[1])/2.0)
             )
             target_region.vertices = create_target_region(target_pos[0], target_pos[1], task_cfg.knob_radius, num_points=100)
             status.text = (
