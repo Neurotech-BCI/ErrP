@@ -179,7 +179,7 @@ class MentalCommandTaskConfig:
     live_duration_s: float = 180.0
 
     # Kalman Filter Stuff
-    activate_kf: bool = False
+    activate_kf: bool = True
     make_kf_adaptive: bool = True
 
 
@@ -223,7 +223,7 @@ class MICursorTaskConfig:
 
     # If True, collect short live LEFT/RIGHT sustained MI blocks at startup
     # and add them as one additional session in LOSO and final fitting.
-    enable_online_lr_calibration: bool = False
+    enable_online_lr_calibration: bool = True
     # Number of sustained live calibration blocks to collect per class.
     online_lr_calibration_reps_per_class: int = 4
     # Preparation time before each live LEFT/RIGHT calibration block.

@@ -335,9 +335,9 @@ def load_offline_mi_dataset(
     n_files_used = 0
 
     for session_id, edf_path in enumerate(edf_paths):
-        if calibrateOnParticipant not in edf_path:
+        if calibrateOnParticipant not in str(edf_path):
             continue
-        print(edf_path)
+        print(str(edf_path))
         raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR")
         raw = standardize_offline_raw(raw)
         stim_channel = find_stim_channel(raw)

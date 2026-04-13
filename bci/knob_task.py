@@ -197,9 +197,18 @@ def run_task(fname: str) -> None:
         lineWidth=3.0,
     )
 
+    target_pos = _sample_target(
+            rng=rng,
+            min_distance=float(task_cfg.min_angular_distance),
+            radius=float(task_cfg.knob_radius),
+            prev_target=0.0
+        )
+
+    target_region_vertices = create_target_region(target_pos[0], target_pos[1], task_cfg.knob_radius, num_points=100) # change this 100 if necessary
+
     target_region = visual.ShapeStim(
         win, 
-        vertices=[], 
+        vertices=[target_region_vertices], 
         fillColor=[0, 0.5, 0],   # Dark green
         lineColor=None,
         opacity=0.6
@@ -207,7 +216,6 @@ def run_task(fname: str) -> None:
 
     heading_rad = task_cfg.start_angle
     steering_state = 0.0
-    target_pos = 0.0
 
     def _update_knob_visual() -> None:
         nose_len = float(task_cfg.knob_radius) * 1.2 # the 1.2 can be altered, I just made it up
@@ -293,6 +301,7 @@ def run_task(fname: str) -> None:
             stim_cfg=stim_cfg,
             target_sfreq=sfreq,
             target_channel_names=model_ch_names,
+            calibrateOnParticipant=""
         )
 
         if bool(task_cfg.enable_online_rest_calibration):

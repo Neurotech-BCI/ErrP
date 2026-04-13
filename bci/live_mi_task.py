@@ -302,7 +302,6 @@ def run_task(
                 X_new = epochs_online.get_data(n_epochs=n_new, picks="eeg")
                 codes = epochs_online.events[-n_new:]
                 # Return the most recent left/right epoch
-                print(float(clock.getTime()) - float(initial_time))
                 return X_new[-1], int(codes[-1])
         return None, None
     
@@ -448,7 +447,7 @@ def run_task(
             right_code=right,
         )
 
-        print(f"[SESSION] {fname}")
+        print(f"[SESSION] {fname}") 
         print(f"[SERIAL] Sending triggers on {port} @ {ser_cfg.baudrate}")
 
         cue_text.text = (
@@ -476,6 +475,12 @@ def run_task(
         
         correct_count = 0
         prediction_count = 0
+
+        epoch_filter = StreamingIIRFilter.from_eeg_config(
+            eeg_cfg=eeg_cfg,
+            sfreq=sfreq,
+            n_channels=len(model_ch_names)
+        )
 
         for live_idx in range(task_cfg.n_live_trials):
             y_true = scheduler.next_code()
@@ -513,7 +518,7 @@ def run_task(
             if code != y_true:
                 print(f"Trial {live_idx + 1}: code mismatch (expected {y_true}, got {code})")
 
-            epoch = filter_block(epoch_raw, eeg_cfg, sfreq)
+            epoch = epoch_filter.process(epoch_raw)
 
             if reject_thresh is not None and np.ptp(epoch, axis=-1).max() > reject_thresh:
                 print(f"Trial {live_idx + 1}: rejected (artifact)")
@@ -607,7 +612,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    ser_cfg = SerialConfig()
 
     participant = sanitize_participant_name(args.participant or input("Enter participant name: "))
     if not participant:

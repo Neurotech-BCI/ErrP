@@ -490,7 +490,6 @@ def run_task(fname: str) -> None:
         target_pos = _sample_target(
             rng=rng,
             x_limit=target_limit_x,
-            y_limit=target_limit_y,
             min_distance=float(task_cfg.target_min_distance_from_center),
         )
         target.pos = (float(target_pos[0]), float(target_pos[1]))

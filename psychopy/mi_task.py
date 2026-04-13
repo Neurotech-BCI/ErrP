@@ -30,7 +30,7 @@ class StimConfig:
 
 @dataclass(frozen=True)
 class TaskConfig:
-    n_calibration_trials: int = 100
+    n_calibration_trials: int = 50
     max_trials_before_break: int = 20
 
     prep_duration_s: float = 3.0
