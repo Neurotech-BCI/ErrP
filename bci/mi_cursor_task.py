@@ -518,7 +518,6 @@ def run_task(fname: str) -> None:
     stream_pull_s = max(0.10, task_cfg.live_update_interval_s * 2.0)
     reject_thresh = eeg_cfg.reject_peak_to_peak
     last_live_ts: float | None = None
-    post_start_pull_delay_s = 1.0
 
     prediction_count = 0
     left_prob = 0.5
@@ -631,13 +630,15 @@ def run_task(fname: str) -> None:
             if "space" in keys:
                 return
 
-    def _settle_before_trial() -> None:
-        settle_clock = core.Clock()
-        while settle_clock.getTime() < task_cfg.trial_start_delay_s:
+    def _warmup_before_trial() -> None:
+        warmup_clock = core.Clock()
+        # Collect post-reset data during the startup delay so the first decoded
+        # window begins after the delay, keeping each trial independent.
+        while warmup_clock.getTime() < task_cfg.trial_start_delay_s:
             if "escape" in event.getKeys():
                 raise KeyboardInterrupt
-            _poll_live_decoder()
-            remaining = max(0.0, task_cfg.trial_start_delay_s - settle_clock.getTime())
+            _poll_live_decoder(pull_enabled=True)
+            remaining = max(0.0, task_cfg.trial_start_delay_s - warmup_clock.getTime())
             cue.text = f"Trial starting in {remaining:.1f}s"
             parts = [
                 f"{label_cfg.left_name}: {left_prob:.2f}",
@@ -645,7 +646,7 @@ def run_task(fname: str) -> None:
             ]
             if int(task_cfg.rest_class_code) in class_index:
                 parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
-            parts.extend([f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", live_note])
+            parts.extend([f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", "startup delay"])
             info.text = "   ".join(parts)
             _draw_frame()
 
@@ -671,12 +672,10 @@ def run_task(fname: str) -> None:
             _wait_for_space("Reach the target with left/right motor imagery")
 
             _reset_trial_state()
-            live_note = "settling"
-            _settle_before_trial()
             _reset_decoder_state()
+            _warmup_before_trial()
 
             trial_clock = core.Clock()
-            pull_enable_t = core.getTime() + post_start_pull_delay_s
             trial_pred_start = prediction_count
             path_length = 0.0
             mean_abs_command_sum = 0.0
@@ -689,7 +688,7 @@ def run_task(fname: str) -> None:
                     raise KeyboardInterrupt
 
                 now_t = core.getTime()
-                _poll_live_decoder(pull_enabled=now_t >= pull_enable_t)
+                _poll_live_decoder(pull_enabled=True)
                 dt = float(np.clip(now_t - last_frame_t, 1e-4, 0.05))
                 last_frame_t = now_t
 
