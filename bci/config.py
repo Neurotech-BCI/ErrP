@@ -223,7 +223,7 @@ class MICursorTaskConfig:
 
     # If True, collect short live LEFT/RIGHT sustained MI blocks at startup
     # and add them as one additional session in LOSO and final fitting.
-    enable_online_lr_calibration: bool = True
+    enable_online_lr_calibration: bool = False
     # Number of sustained live calibration blocks to collect per class.
     online_lr_calibration_reps_per_class: int = 4
     # Preparation time before each live LEFT/RIGHT calibration block.
@@ -234,10 +234,10 @@ class MICursorTaskConfig:
     online_lr_calibration_iti_s: float = 2.0
 
     # If True, add a fixed signed offset to the live right-left command.
-    enable_live_bias_offset: bool = False
+    enable_live_bias_offset: bool = True
     # Signed command offset added to (p_right - p_left). Positive favors
     # RIGHT, negative favors LEFT.
-    live_bias_offset: float = 0.0
+    live_bias_offset: float = 0.2
 
     # Window / display settings.
     fullscreen: bool = False

@@ -518,6 +518,7 @@ def run_task(fname: str) -> None:
     stream_pull_s = max(0.10, task_cfg.live_update_interval_s * 2.0)
     reject_thresh = eeg_cfg.reject_peak_to_peak
     last_live_ts: float | None = None
+    post_start_pull_delay_s = 1.0
 
     prediction_count = 0
     left_prob = 0.5
@@ -528,11 +529,30 @@ def run_task(fname: str) -> None:
     live_note = "warming up"
     bias_offset = float(task_cfg.live_bias_offset) if bool(task_cfg.enable_live_bias_offset) else 0.0
 
-    def _poll_live_decoder() -> None:
+    def _reset_decoder_state() -> None:
+        nonlocal last_live_ts, live_buffer, prediction_count
+        nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note
+        live_filter.reset()
+        live_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
+        last_live_ts = None
+        pred_clock.reset()
+        prediction_count = 0
+        left_prob = 0.5
+        right_prob = 0.5
+        rest_prob = 0.0
+        raw_command = 0.0
+        ema_command = 0.0
+        live_note = "trial reset"
+
+    def _poll_live_decoder(pull_enabled: bool = True) -> None:
         nonlocal last_live_ts, live_buffer, prediction_count
         nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note
 
-        data, ts = stream.get_data(winsize=stream_pull_s, picks="all")
+        if pull_enabled:
+            data, ts = stream.get_data(winsize=stream_pull_s, picks="all")
+        else:
+            data, ts = np.empty((len(model_ch_names), 0), dtype=np.float32), None
+            live_note = "startup hold"
         if data.size > 0 and ts is not None and len(ts) > 0:
             ts_arr = np.asarray(ts)
             mask = np.ones_like(ts_arr, dtype=bool) if last_live_ts is None else (ts_arr > float(last_live_ts))
@@ -548,8 +568,8 @@ def run_task(fname: str) -> None:
             return
 
         pred_clock.reset()
-        if live_buffer.shape[1] < keep_n:
-            needed_s = max(0.0, (keep_n - live_buffer.shape[1]) / sfreq)
+        if live_buffer.shape[1] < window_n:
+            needed_s = max(0.0, (window_n - live_buffer.shape[1]) / sfreq)
             raw_command = 0.0
             ema_command *= 0.95
             live_note = f"warming up ({needed_s:.1f}s)"
@@ -651,15 +671,12 @@ def run_task(fname: str) -> None:
             _wait_for_space("Reach the target with left/right motor imagery")
 
             _reset_trial_state()
-            ema_command = 0.0
-            raw_command = 0.0
-            left_prob = 0.5
-            right_prob = 0.5
-            rest_prob = 0.0
             live_note = "settling"
             _settle_before_trial()
+            _reset_decoder_state()
 
             trial_clock = core.Clock()
+            pull_enable_t = core.getTime() + post_start_pull_delay_s
             trial_pred_start = prediction_count
             path_length = 0.0
             mean_abs_command_sum = 0.0
@@ -671,9 +688,8 @@ def run_task(fname: str) -> None:
                 if "escape" in event.getKeys():
                     raise KeyboardInterrupt
 
-                _poll_live_decoder()
-
                 now_t = core.getTime()
+                _poll_live_decoder(pull_enabled=now_t >= pull_enable_t)
                 dt = float(np.clip(now_t - last_frame_t, 1e-4, 0.05))
                 last_frame_t = now_t
 
@@ -684,8 +700,10 @@ def run_task(fname: str) -> None:
                     blend = float(np.clip(dt / task_cfg.steering_time_constant_s, 0.0, 1.0))
                     steering_state += (command_drive - steering_state) * blend
 
+                # Positive command means "right"; in screen coordinates that should rotate clockwise.
+                # Clockwise corresponds to decreasing the heading angle.
                 heading_rad = _wrap_angle(
-                    heading_rad + math.radians(task_cfg.max_turn_rate_deg_s) * steering_state * dt
+                    heading_rad - math.radians(task_cfg.max_turn_rate_deg_s) * steering_state * dt
                 )
 
                 proposed_pos = cursor_pos + np.array(
