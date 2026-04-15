@@ -235,6 +235,11 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
         units="norm",
         fullscr=task_cfg.fullscreen,
     )
+    # Correct for non-square displays so circles remain circular in norm units.
+    if float(win.size[0]) > 0.0 and float(win.size[1]) > 0.0:
+        view_scale_x = float(win.size[1]) / float(win.size[0])
+        win.viewScale = (view_scale_x, 1.0)
+        logger.info("Applied display aspect correction: viewScale=(%.4f, 1.0000)", view_scale_x)
 
     white = (0.92, 0.92, 0.92)
     accent = (0.84, 0.90, 0.96)
@@ -436,8 +441,8 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
 
         n_per_class = 5
         hold_s = 1.2
-        prep_s = 2.0
-        iti_s = 0.5
+        prep_s = 2.5
+        iti_s = 1.5
         min_samples = jaw_window_n
 
         cue.text = "Jaw calibration"
