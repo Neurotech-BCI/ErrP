@@ -182,46 +182,44 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
     accent = (0.84, 0.90, 0.96)
     paused_color = (0.28, 0.80, 0.44)
     running_color = (0.92, 0.60, 0.22)
-    orbit_color = (0.28, 0.28, 0.28)
+    arena_color = (0.28, 0.28, 0.28)
 
     title = visual.TextStim(win, text="Jaw Pause Rotation Cursor", pos=(0, 0.90), height=0.055, color=white)
     cue = visual.TextStim(win, text="", pos=(0, 0.78), height=0.05, color=white)
     info = visual.TextStim(win, text="", pos=(0, -0.82), height=0.040, color=accent)
     status = visual.TextStim(win, text="", pos=(0, -0.91), height=0.040, color=(0.84, 0.84, 0.84))
 
-    orbit_radius = 0.45
-    orbit = visual.Circle(
+    arena_margin = float(task_cfg.arena_margin)
+    cursor_radius = max(float(task_cfg.cursor_radius), 0.040)
+    arena_limit_x = 1.0 - arena_margin - cursor_radius
+    arena_limit_y = 1.0 - arena_margin - cursor_radius
+    move_speed_norm_s = float(task_cfg.forward_speed_norm_s)
+    arrow_len = cursor_radius * 1.6
+
+    arena_outline = visual.Rect(
         win,
-        radius=orbit_radius,
-        edges=128,
-        pos=(0.0, 0.0),
+        width=2.0 - 2.0 * arena_margin,
+        height=2.0 - 2.0 * arena_margin,
+        pos=(0, 0),
+        lineColor=arena_color,
         fillColor=None,
-        lineColor=orbit_color,
-        lineWidth=2.0,
+        lineWidth=1.5,
     )
-    center_dot = visual.Circle(
+    cursor_dot = visual.Circle(
         win,
-        radius=0.02,
+        radius=cursor_radius,
         edges=64,
         pos=(0.0, 0.0),
-        fillColor=(0.35, 0.35, 0.35),
-        lineColor=None,
+        fillColor=paused_color,
+        lineColor=white,
+        lineWidth=1.5,
     )
     pointer = visual.Line(
         win,
         start=(0.0, 0.0),
-        end=(0.0, orbit_radius),
+        end=(0.0, arrow_len),
         lineColor=white,
         lineWidth=3.0,
-    )
-    cursor_dot = visual.Circle(
-        win,
-        radius=0.04,
-        edges=64,
-        pos=(0.0, orbit_radius),
-        fillColor=paused_color,
-        lineColor=white,
-        lineWidth=1.5,
     )
 
     pred_clock = core.Clock()
@@ -256,6 +254,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
     manual_rotation_dir = 1.0
     rotation_speed_rad_s = math.radians(float(task_cfg.max_turn_rate_deg_s) * 0.60)
     heading_rad = math.pi / 2.0
+    cursor_pos = np.zeros(2, dtype=np.float64)
 
     if stream is not None:
         live_filter = StreamingIIRFilter.from_eeg_config(
@@ -265,17 +264,17 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
         )
 
     def _update_cursor_visual() -> None:
+        cursor_dot.pos = (float(cursor_pos[0]), float(cursor_pos[1]))
+        pointer.start = (float(cursor_pos[0]), float(cursor_pos[1]))
         pointer.end = (
-            float(math.cos(heading_rad) * orbit_radius),
-            float(math.sin(heading_rad) * orbit_radius),
+            float(cursor_pos[0] + math.cos(heading_rad) * arrow_len),
+            float(cursor_pos[1] + math.sin(heading_rad) * arrow_len),
         )
-        cursor_dot.pos = pointer.end
         cursor_dot.fillColor = paused_color if is_paused else running_color
 
     def _draw_frame() -> None:
-        orbit.draw()
+        arena_outline.draw()
         pointer.draw()
-        center_dot.draw()
         cursor_dot.draw()
         title.draw()
         cue.draw()
@@ -361,7 +360,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
         else:
             latest_pred_code = int(stim_cfg.left_code)
 
-        if not debug_mode:
+        if not debug_mode and is_paused:
             if latest_pred_code == int(stim_cfg.left_code):
                 rotation_dir = -1.0
             elif latest_pred_code == int(stim_cfg.right_code):
@@ -382,7 +381,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
                 is_paused,
             )
 
-    cue.text = "Jaw clench toggles pause/play. ESC to quit."
+    cue.text = "Jaw clench toggles pause/play. Paused: rotate heading. Unpaused: move in set heading. ESC to quit."
     if debug_mode:
         cue.text += " Debug mode: SPACE toggles pause/play, LEFT/RIGHT set rotation."
     _update_cursor_visual()
@@ -409,9 +408,22 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
             last_frame_t = now_t
 
             active_dir = manual_rotation_dir if debug_mode else rotation_dir
-            # Requirement: cursor rotates only while paused.
+            # Rotate heading only while paused.
             if is_paused:
                 heading_rad = _wrap_angle(heading_rad + active_dir * rotation_speed_rad_s * dt)
+            else:
+                # Move the cursor in the heading selected while paused.
+                cursor_pos[0] += math.cos(heading_rad) * move_speed_norm_s * dt
+                cursor_pos[1] += math.sin(heading_rad) * move_speed_norm_s * dt
+                # Wrap around screen edges to preserve travel direction.
+                if cursor_pos[0] > arena_limit_x:
+                    cursor_pos[0] = -arena_limit_x
+                elif cursor_pos[0] < -arena_limit_x:
+                    cursor_pos[0] = arena_limit_x
+                if cursor_pos[1] > arena_limit_y:
+                    cursor_pos[1] = -arena_limit_y
+                elif cursor_pos[1] < -arena_limit_y:
+                    cursor_pos[1] = arena_limit_y
 
             _update_cursor_visual()
 
