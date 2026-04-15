@@ -72,6 +72,27 @@ def _wrap_angle(angle: float) -> float:
     return float((angle + math.pi) % (2.0 * math.pi) - math.pi)
 
 
+def _sample_target_position(
+    rng: np.random.Generator,
+    x_limit: float,
+    y_limit: float,
+    avoid: np.ndarray,
+    min_distance: float,
+) -> np.ndarray:
+    min_distance = max(0.0, float(min_distance))
+    for _ in range(1000):
+        candidate = np.array(
+            [
+                rng.uniform(-x_limit, x_limit),
+                rng.uniform(-y_limit, y_limit),
+            ],
+            dtype=np.float64,
+        )
+        if float(np.linalg.norm(candidate - avoid)) >= min_distance:
+            return candidate
+    return np.array([0.0, 0.0], dtype=np.float64)
+
+
 def _select_jaw_channel_indices(ch_names: list[str]) -> list[int]:
     priority = {"FP1", "FP2", "AF3", "AF4", "F7", "F8", "F3", "F4"}
     idxs = [i for i, name in enumerate(ch_names) if canonicalize_channel_name(name) in priority]
@@ -122,6 +143,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
         h_freq=30.0,
         reject_peak_to_peak=150.0,
     )
+    rng = np.random.default_rng()
 
     logger.info("Starting jaw-pause cursor task | debug_mode=%s", bool(debug_mode))
 
@@ -231,6 +253,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
     arena_limit_y = 1.0 - arena_margin - cursor_radius
     move_speed_norm_s = float(task_cfg.forward_speed_norm_s)
     arrow_len = cursor_radius * 1.6
+    cursor_pos = np.zeros(2, dtype=np.float64)
 
     arena_outline = visual.Rect(
         win,
@@ -257,6 +280,23 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
         lineColor=white,
         lineWidth=3.0,
     )
+    target_radius = max(cursor_radius * 0.85, 0.030)
+    target_color = (0.95, 0.78, 0.24)
+    target = visual.Circle(
+        win,
+        radius=target_radius,
+        edges=64,
+        pos=(0.0, 0.0),
+        fillColor=target_color,
+        lineColor=white,
+        lineWidth=1.2,
+        opacity=0.0,
+    )
+    target_margin = target_radius + 0.01
+    target_limit_x = max(0.05, arena_limit_x - target_margin)
+    target_limit_y = max(0.05, arena_limit_y - target_margin)
+    target_pos = np.zeros(2, dtype=np.float64)
+    target_hits = 0
 
     pred_clock = core.Clock()
     last_frame_t = core.getTime()
@@ -293,7 +333,6 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
     manual_rotation_dir = 1.0
     rotation_speed_rad_s = math.radians(float(task_cfg.max_turn_rate_deg_s) * 0.60)
     heading_rad = math.pi / 2.0
-    cursor_pos = np.zeros(2, dtype=np.float64)
 
     if stream is not None:
         live_filter = StreamingIIRFilter.from_eeg_config(
@@ -313,6 +352,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
 
     def _draw_frame() -> None:
         arena_outline.draw()
+        target.draw()
         pointer.draw()
         cursor_dot.draw()
         title.draw()
@@ -320,6 +360,18 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
         info.draw()
         status.draw()
         win.flip()
+
+    def _relocate_target(initial: bool = False) -> None:
+        nonlocal target_pos
+        min_distance = 0.12 if initial else 0.22
+        target_pos = _sample_target_position(
+            rng=rng,
+            x_limit=target_limit_x,
+            y_limit=target_limit_y,
+            avoid=cursor_pos,
+            min_distance=min_distance,
+        )
+        target.pos = (float(target_pos[0]), float(target_pos[1]))
 
     def _wait_for_seconds(duration_s: float) -> None:
         clock = core.Clock()
@@ -367,9 +419,24 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
         if stream is None:
             return
 
+        original_layout = {
+            "cue_pos": cue.pos,
+            "info_pos": info.pos,
+            "status_pos": status.pos,
+            "cue_h": cue.height,
+            "info_h": info.height,
+            "status_h": status.height,
+        }
+        cue.pos = (0.0, 0.26)
+        info.pos = (0.0, 0.10)
+        status.pos = (0.0, -0.06)
+        cue.height = 0.065
+        info.height = 0.052
+        status.height = 0.048
+
         n_per_class = 5
         hold_s = 1.2
-        prep_s = 0.8
+        prep_s = 2.0
         iti_s = 0.5
         min_samples = jaw_window_n
 
@@ -378,76 +445,84 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
         status.text = "Press SPACE to begin calibration. ESC to quit."
         _wait_for_space("Jaw calibration")
 
-        labels = [0] * n_per_class + [1] * n_per_class
-        np.random.default_rng().shuffle(labels)
-        X_cal: list[np.ndarray] = []
-        y_cal: list[int] = []
+        try:
+            labels = [0] * n_per_class + [1] * n_per_class
+            np.random.default_rng().shuffle(labels)
+            X_cal: list[np.ndarray] = []
+            y_cal: list[int] = []
 
-        for i, y_label in enumerate(labels, start=1):
-            is_clench = bool(y_label == 1)
-            trial_name = "JAW CLENCH" if is_clench else "REST"
+            for i, y_label in enumerate(labels, start=1):
+                is_clench = bool(y_label == 1)
+                trial_name = "JAW CLENCH" if is_clench else "REST"
 
-            cue.text = "Prepare"
-            info.text = f"Next trial: {trial_name}"
-            status.text = f"Calibration {i}/{len(labels)}"
-            _wait_for_seconds(prep_s)
+                cue.text = "Prepare"
+                info.text = f"Next trial: {trial_name}"
+                status.text = f"Calibration {i}/{len(labels)}"
+                _wait_for_seconds(prep_s)
 
-            cue.text = trial_name
-            info.text = (
-                "Clench jaw and hold." if is_clench else "Relax face and avoid blinking/movement."
-            )
-            status.text = f"Hold for {hold_s:.1f}s"
-            block = _collect_stream_block(hold_s)
+                cue.text = trial_name
+                info.text = (
+                    "Clench jaw and hold." if is_clench else "Relax face and avoid blinking/movement."
+                )
+                status.text = f"Hold for {hold_s:.1f}s"
+                block = _collect_stream_block(hold_s)
 
-            if block.shape[1] >= min_samples:
-                feat_block = block[:, -min_samples:]
-                X_cal.append(_extract_jaw_features(feat_block, jaw_idxs))
-                y_cal.append(int(y_label))
-            else:
-                logger.warning(
-                    "Skipping short calibration block %d: samples=%d, needed=%d",
-                    i,
-                    int(block.shape[1]),
-                    int(min_samples),
+                if block.shape[1] >= min_samples:
+                    feat_block = block[:, -min_samples:]
+                    X_cal.append(_extract_jaw_features(feat_block, jaw_idxs))
+                    y_cal.append(int(y_label))
+                else:
+                    logger.warning(
+                        "Skipping short calibration block %d: samples=%d, needed=%d",
+                        i,
+                        int(block.shape[1]),
+                        int(min_samples),
+                    )
+
+                cue.text = "Relax"
+                info.text = "Short break"
+                status.text = ""
+                _wait_for_seconds(iti_s)
+
+            if len(y_cal) < 6 or len(set(y_cal)) < 2:
+                raise RuntimeError(
+                    "Jaw calibration failed: not enough usable rest/clench samples. "
+                    "Please rerun and reduce movement/blinks during REST trials."
                 )
 
-            cue.text = "Relax"
-            info.text = "Short break"
-            status.text = ""
-            _wait_for_seconds(iti_s)
-
-        if len(y_cal) < 6 or len(set(y_cal)) < 2:
-            raise RuntimeError(
-                "Jaw calibration failed: not enough usable rest/clench samples. "
-                "Please rerun and reduce movement/blinks during REST trials."
+            X_np = np.asarray(X_cal, dtype=np.float32)
+            y_np = np.asarray(y_cal, dtype=int)
+            jaw_classifier = make_pipeline(
+                StandardScaler(),
+                LogisticRegression(
+                    random_state=42,
+                    class_weight="balanced",
+                    solver="liblinear",
+                    max_iter=1000,
+                ),
+            )
+            jaw_classifier.fit(X_np, y_np)
+            train_acc = float(jaw_classifier.score(X_np, y_np))
+            logger.info(
+                "Jaw calibration complete: samples=%d, rest=%d, clench=%d, train_acc=%.3f, jaw_channels=%s",
+                int(len(y_np)),
+                int(np.sum(y_np == 0)),
+                int(np.sum(y_np == 1)),
+                train_acc,
+                [model_ch_names[idx] for idx in jaw_idxs],
             )
 
-        X_np = np.asarray(X_cal, dtype=np.float32)
-        y_np = np.asarray(y_cal, dtype=int)
-        jaw_classifier = make_pipeline(
-            StandardScaler(),
-            LogisticRegression(
-                random_state=42,
-                class_weight="balanced",
-                solver="liblinear",
-                max_iter=1000,
-            ),
-        )
-        jaw_classifier.fit(X_np, y_np)
-        train_acc = float(jaw_classifier.score(X_np, y_np))
-        logger.info(
-            "Jaw calibration complete: samples=%d, rest=%d, clench=%d, train_acc=%.3f, jaw_channels=%s",
-            int(len(y_np)),
-            int(np.sum(y_np == 0)),
-            int(np.sum(y_np == 1)),
-            train_acc,
-            [model_ch_names[idx] for idx in jaw_idxs],
-        )
-
-        cue.text = "Calibration complete"
-        info.text = f"Jaw classifier ready (train acc {train_acc:.2f})"
-        status.text = "Jaw clench toggles pause/play. Press SPACE to start task."
-        _wait_for_space("Calibration complete")
+            cue.text = "Calibration complete"
+            info.text = f"Jaw classifier ready (train acc {train_acc:.2f})"
+            status.text = "Jaw clench toggles pause/play. Press SPACE to start task."
+            _wait_for_space("Calibration complete")
+        finally:
+            cue.pos = original_layout["cue_pos"]
+            info.pos = original_layout["info_pos"]
+            status.pos = original_layout["status_pos"]
+            cue.height = original_layout["cue_h"]
+            info.height = original_layout["info_h"]
+            status.height = original_layout["status_h"]
 
     def _toggle_pause(reason: str) -> None:
         nonlocal is_paused, jaw_last_toggle_t
@@ -554,6 +629,9 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
     if not debug_mode:
         _run_jaw_calibration()
 
+    _relocate_target(initial=True)
+    target.opacity = 1.0
+
     cue.text = "Jaw clench toggles pause/play. Paused: rotate heading. Unpaused: move in set heading. ESC to quit."
     if debug_mode:
         cue.text += " Debug mode: SPACE toggles pause/play, LEFT/RIGHT set rotation."
@@ -599,6 +677,10 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
                 elif cursor_pos[1] < -arena_limit_y:
                     cursor_pos[1] = arena_limit_y
 
+            if float(np.linalg.norm(cursor_pos - target_pos)) <= float(cursor_radius + target_radius):
+                target_hits += 1
+                _relocate_target(initial=False)
+
             _update_cursor_visual()
 
             mode_text = "debug" if debug_mode else "live"
@@ -610,7 +692,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
             )
             status.text = (
                 f"pred={latest_pred_code}   dir={active_dir:+.0f}   updates={prediction_count}   "
-                f"jaw_p={jaw_prob:.2f}   {live_note}"
+                f"jaw_p={jaw_prob:.2f}   targets={target_hits}   {live_note}"
             )
             _draw_frame()
 
