@@ -227,9 +227,9 @@ def run_task(fname: str) -> None:
 
     def _draw_frame() -> None:
         arena_outline.draw()
+        knob.draw()
         target_region.draw()
         heading_line.draw()
-        knob.draw()
         title.draw()
         cue.draw()
         info.draw()
@@ -418,7 +418,7 @@ def run_task(fname: str) -> None:
             rng=rng,
             min_distance=float(task_cfg.min_angular_distance),
             radius=float(task_cfg.knob_radius),
-            prev_target=target_pos
+            prev_target=np.mean(target_pos)
         )
 
         target_region_vertices = create_target_region(target_pos[0], target_pos[1], task_cfg.knob_radius, num_points=100) # change this 100 if necessary

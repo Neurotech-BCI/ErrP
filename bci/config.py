@@ -282,7 +282,7 @@ class MICursorTaskConfig:
     # Decrease it for quicker but potentially more abrupt steering.
     steering_time_constant_s: float = 0.35
 
-    calirate_on_participant: str = "andy"
+    calirate_on_participant: str = "mi"
 
 @dataclass(frozen=True)
 class LiveMITaskConfig:
@@ -397,18 +397,18 @@ class KnobTaskConfig:
     post_hit_pause_s: float = 0.40
 
     # parameters specialized for this task
-    knob_radius: float = 0.2
+    knob_radius: float = 0.5
     rotation_speed: float = 0.1 # this is just a multiplier
     min_angular_distance: float = 0.5 # in radians. 0.5 rad is around 28.6 degrees. distances between target region centers in adjacent trials.
-    target_region_radius: float = 0.2 # also in radians. target region will be 2*target_region_radius in size
+    target_region_radius: float = 0.05 # also in radians. target region will be 2*target_region_radius in size
     start_angle: float = 0 # ie start facing up / 12 o'clock
 
     # Increase `max_turn_rate_deg_s` for tighter turns and more agility.
     # Decrease it for gentler, more stable arcs.
-    max_turn_rate_deg_s: float = 115.0
+    max_turn_rate_deg_s: float = 65.0
     # Increase `command_ema_alpha` for faster but noisier command updates.
     # Decrease it for smoother but laggier control.
-    command_ema_alpha: float = 0.28
+    command_ema_alpha: float = 0.56
     # Increase `command_deadband` to suppress small noisy turns.
     # Decrease it to make weak intent move the cursor more readily.
     command_deadband: float = 0.10
