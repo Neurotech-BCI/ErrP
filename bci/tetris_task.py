@@ -321,6 +321,7 @@ def run_task(fname: str) -> None:  # noqa: C901
     jaw_ch_idx = len(model_ch_names) - 1
     jaw_detector = JawClenchDetector(fs=sfreq)
     jaw_thresh_min = 5.0   # µV (raw units) – tune per participant
+    jaw_calibration_duration_s = 5.0
 
     # ---------------------------------------------------------------------------
     # PsychoPy window
@@ -333,7 +334,7 @@ def run_task(fname: str) -> None:  # noqa: C901
 
     win = visual.Window(
         size=(900, 900),
-        color=(-0.95, -0.95, -0.95),
+        color=(0.18, 0.18, 0.18),
         units="norm",
         fullscr=False,
     )
@@ -413,6 +414,41 @@ def run_task(fname: str) -> None:  # noqa: C901
             _next_rects[i].fillColor = _color(board.next_type)
             _next_rects[i].draw()
 
+    EMPTY_CELL_COLOR = (-0.45, -0.45, -0.45)
+
+    def _draw_empty_board_screen(cue: str, status: str = "") -> None:
+        rect_idx = 0
+
+        board_outline.draw()
+
+        # draw empty grid
+        for row in range(BOARD_ROWS):
+            for col in range(BOARD_COLS):
+                r = _rects[rect_idx]
+                rect_idx += 1
+                r.pos = cell_xy(row, col)
+                r.fillColor = EMPTY_CELL_COLOR
+                r.draw()    
+        # UI
+        txt_score.text = "Score\n0"
+        txt_level.text = "Level\n1"
+        txt_lines.text = "Lines\n0"
+        txt_next.text = "NEXT"
+        txt_bci.text = ""
+
+        txt_cue.text = cue
+        txt_status.text = status
+
+        txt_score.draw()
+        txt_level.draw()
+        txt_lines.draw()
+        txt_next.draw()
+        txt_bci.draw()
+        txt_cue.draw()
+        txt_status.draw()
+
+        win.flip()
+
     def _draw_frame(board: TetrisBoard) -> None:
         board_outline.draw()
         _draw_board(board)
@@ -436,9 +472,10 @@ def run_task(fname: str) -> None:  # noqa: C901
     online_cal_session_id: int | None = None
     train_only_session_ids: set[int] = set()
 
-    txt_cue.text    = "Preparing MI model..."
-    txt_status.text = "Loading offline EDF sessions."
-    win.flip()
+    _draw_empty_board_screen(
+    "Preparing MI model...",
+    "Loading offline EDF sessions.",
+    )
 
     try:
         dataset = load_offline_mi_dataset(
@@ -454,14 +491,17 @@ def run_task(fname: str) -> None:  # noqa: C901
 
         # ---- optional online REST calibration ----
         if bool(task_cfg.enable_online_rest_calibration):
-            txt_cue.text    = "REST calibration – relax both hands"
-            txt_status.text = "Press SPACE to start. ESC to quit."
-            win.flip()
+            _draw_empty_board_screen(
+            f"Model ready  LOSO={loso.mean_accuracy:.3f}±{loso.std_accuracy:.3f}",
+            "Press SPACE to calibrate jaw clench and start.",
+            )
             while True:
                 keys = event.getKeys()
                 if "escape" in keys: raise KeyboardInterrupt
                 if "space"  in keys: break
                 win.flip()
+
+            _run_jaw_calibration()
 
             txt_cue.text    = f"REST – keep still for {task_cfg.rest_calibration_duration_s:.0f}s"
             txt_status.text = ""
@@ -746,6 +786,53 @@ def run_task(fname: str) -> None:  # noqa: C901
                 return False
             if "space" in keys:
                 return True
+
+    # ---------------------------------------------------------------------------
+    # Jaw calibration (Flappy-style timing)
+    # ---------------------------------------------------------------------------
+
+    def _run_jaw_calibration() -> None:
+        nonlocal last_jaw_ts, jaw_buffer_raw, jaw_buffer_ts
+    calib_raw = []
+    calib_ts = []
+    last_cal_ts = None
+    cal_clock = core.Clock()
+
+    while cal_clock.getTime() < jaw_calibration_duration_s:
+        if "escape" in event.getKeys():
+            raise KeyboardInterrupt
+
+        data, ts = stream.get_data(winsize=0.25, picks="all")
+        if data.size > 0 and ts is not None and len(ts) > 0:
+            ts_arr = np.asarray(ts)
+            mask = np.ones_like(ts_arr, bool) if last_cal_ts is None else (ts_arr > float(last_cal_ts))
+            if np.any(mask):
+                new_data = np.asarray(data[jaw_ch_idx, mask], dtype=np.float32)
+                new_ts = ts_arr[mask].astype(np.float64)
+                last_cal_ts = float(new_ts[-1])
+                calib_raw.append(new_data)
+                calib_ts.append(new_ts)
+
+        remaining = max(0.0, jaw_calibration_duration_s - cal_clock.getTime())
+
+        _draw_empty_board_screen(
+            "Jaw calibration",
+            f"Clench steadily for {remaining:0.1f}s",
+        )
+
+    # Optional adaptive thresholding
+    if calib_raw:
+        jaw_signal = np.concatenate(calib_raw).astype(np.float32)
+        if hasattr(jaw_detector, "calibrate"):
+            try:
+                jaw_detector.calibrate(jaw_signal)
+            except Exception:
+                pass
+
+    # reset buffers
+    last_jaw_ts = None
+    jaw_buffer_raw = np.empty(0, dtype=np.float32)
+    jaw_buffer_ts = np.empty(0, dtype=np.float64)
 
     # ---------------------------------------------------------------------------
     # Main game loop
