@@ -1,15 +1,7 @@
 from __future__ import annotations
 
-import time
-
 import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks
-
-try:
-    import pylsl
-    _HAS_LSL = True
-except ImportError:          # allow offline testing without LSL installed
-    _HAS_LSL = False
 
 
 class JawClenchDetector:
@@ -18,15 +10,28 @@ class JawClenchDetector:
     def __init__(self, fs: float) -> None:
         self.fs = float(fs)
 
-        # --- timing ---
-        self.refractory   = 0.50   # s  (Tetris: longer than Flappy Bird)
-        self.merge_tol    = 0.10   # s  (merge peaks within one chunk boundary)
-        self.last_clench_time: float = 0.0
-        self.recent_clenches: list[float] = []
+        # Detection timing gates (seconds).
+        self.refractory = 0.60
+        self.merge_tol = 0.10
+        self.recent_horizon_s = 3.0
 
-        # --- adaptive baseline ---
+        # Peak constraints.
+        self.min_peak_width_s = 0.035
+        self.max_peak_width_s = 0.35
+        self.min_peak_distance_s = 0.18
+
+        # Robust threshold controls.
+        self.threshold_z = 4.0
+        self.peak_z = 6.0
+        self.calibrated_floor = 0.0
+
+        # Adaptive baseline window (envelope domain).
         self.baseline_window: list[float] = []
-        self.baseline_size   = int(5 * self.fs)
+        self.baseline_size = int(6 * self.fs)
+
+        # Runtime state in signal timestamp domain.
+        self.last_clench_ts: float | None = None
+        self.recent_clenches: list[float] = []
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -70,6 +75,32 @@ class JawClenchDetector:
             scale = 1.0
         return med, scale
 
+    def reset_runtime_state(self) -> None:
+        self.last_clench_ts = None
+        self.recent_clenches.clear()
+
+    def calibrate(self, signal: np.ndarray) -> float:
+        """Prime baseline statistics from a short relaxed jaw segment."""
+        x = np.asarray(signal, dtype=float)
+        if x.size < 8:
+            return self.calibrated_floor
+
+        env = self._envelope(self._bandpass(x, 20.0, 45.0))
+        env = env[np.isfinite(env)]
+        if env.size < 8:
+            return self.calibrated_floor
+
+        quiet_cap = float(np.percentile(env, 35))
+        quiet = env[env <= quiet_cap]
+        if quiet.size < 8:
+            quiet = env
+
+        self.baseline_window = quiet[-self.baseline_size :].tolist()
+        base_med, base_scale = self._robust_stats(self.baseline_window)
+        floor = max(base_med + 4.0 * base_scale, float(np.percentile(env, 70)) * 0.45)
+        self.calibrated_floor = max(self.calibrated_floor, float(floor))
+        return self.calibrated_floor
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -93,69 +124,103 @@ class JawClenchDetector:
         new_clenches   : LSL timestamps of newly confirmed clenches
         info           : dict with 'threshold', 'n_peaks', 'peak_heights'
         """
-        signal     = np.asarray(signal,     dtype=float)
+        signal = np.asarray(signal, dtype=float)
         timestamps = np.asarray(timestamps, dtype=float)
 
-        if signal.size == 0:
+        n = min(signal.size, timestamps.size)
+        if n == 0:
+            return np.array([], dtype=int), [], {
+                "threshold": 0.0, "n_peaks": 0, "peak_heights": [],
+            }
+        signal = signal[-n:]
+        timestamps = timestamps[-n:]
+
+        if signal.size < 8:
             return np.array([], dtype=int), [], {
                 "threshold": 0.0, "n_peaks": 0, "peak_heights": [],
             }
 
-        # 1. Band-pass into the jaw-clench band
+        # 1. Band-pass into the jaw-clench band.
         jaw_band = self._bandpass(signal, 20.0, 45.0)
 
-        # 2. RMS envelope
+        # 2. RMS envelope.
         jaw_env = self._envelope(jaw_band)
+        jaw_env = np.asarray(jaw_env, dtype=float)
+        jaw_env[~np.isfinite(jaw_env)] = 0.0
 
-        # 3. Update running baseline
-        self.baseline_window.extend(jaw_env.tolist())
-        if len(self.baseline_window) > self.baseline_size:
-            self.baseline_window = self.baseline_window[-self.baseline_size:]
+        # 3. Update baseline from lower-energy samples to avoid contamination.
+        if self.baseline_window:
+            base_med_prev, base_scale_prev = self._robust_stats(self.baseline_window)
+        else:
+            base_med_prev, base_scale_prev = self._robust_stats(jaw_env)
+
+        quiet_cap = base_med_prev + 2.0 * max(base_scale_prev, 1e-9)
+        quiet = jaw_env[jaw_env <= quiet_cap]
+        if quiet.size < max(8, int(0.05 * jaw_env.size)):
+            q25 = float(np.percentile(jaw_env, 25))
+            quiet = jaw_env[jaw_env <= q25]
+        if quiet.size > 0:
+            self.baseline_window.extend(quiet.tolist())
+            if len(self.baseline_window) > self.baseline_size:
+                self.baseline_window = self.baseline_window[-self.baseline_size :]
 
         base_med, base_scale = self._robust_stats(self.baseline_window)
-
+        adaptive_floor = max(float(thresh_min), self.calibrated_floor)
         thresh = max(
-            base_med + 1.8 * base_scale,
-            float(np.percentile(jaw_env, 88)),
-            float(thresh_min),
+            adaptive_floor,
+            base_med + self.threshold_z * base_scale,
         )
 
-        # 4. Peak detection
+        # 4. Peak detection in envelope domain.
+        min_width = max(1, int(round(self.min_peak_width_s * self.fs)))
+        max_width = max(min_width, int(round(self.max_peak_width_s * self.fs)))
+        min_dist = max(1, int(round(self.min_peak_distance_s * self.fs)))
+        prominence = max(0.5 * base_scale, 0.10 * thresh, 1e-6)
+
         peaks, props = find_peaks(
             jaw_env,
-            height   = thresh,
-            width    = (int(0.02 * self.fs), int(0.30 * self.fs)),
-            distance = int(0.15 * self.fs),
-            prominence = max(thresh * 0.06, 1e-6),
+            height=thresh,
+            width=(min_width, max_width),
+            distance=min_dist,
+            prominence=prominence,
         )
 
-        # 5. Filter by refractory / merge tolerance
+        # 5. Filter by z-score + refractory / merge tolerance.
+        accepted_peak_idx: list[int] = []
         new_clenches: list[float] = []
-        now_wall = time.time()
+        peak_heights = props.get("peak_heights", np.array([], dtype=float))
 
-        for p in peaks:
+        for i, p in enumerate(peaks):
             t = float(timestamps[p])
+            height = float(peak_heights[i]) if i < len(peak_heights) else float(jaw_env[p])
+            z = (height - base_med) / max(base_scale, 1e-9)
+            if z < self.peak_z:
+                continue
 
             if any(abs(t - prev) < self.merge_tol for prev in self.recent_clenches):
                 continue
 
-            if now_wall - self.last_clench_time < self.refractory:
+            if self.last_clench_ts is not None and (t - self.last_clench_ts) < self.refractory:
                 continue
 
-            self.last_clench_time = now_wall
+            self.last_clench_ts = t
             self.recent_clenches.append(t)
+            accepted_peak_idx.append(int(p))
             new_clenches.append(t)
 
-        # 6. Prune stale clench history (keep last 2 s)
-        if _HAS_LSL:
-            now_lsl = pylsl.local_clock()
-            self.recent_clenches = [t for t in self.recent_clenches if now_lsl - t < 2.0]
+        # 6. Prune stale clench history in signal-time domain.
+        now_ts = float(timestamps[-1])
+        horizon = max(self.recent_horizon_s, self.refractory * 4.0)
+        self.recent_clenches = [t for t in self.recent_clenches if now_ts - t < horizon]
 
         info = {
-            "threshold":    float(thresh),
-            "n_peaks":      int(len(peaks)),
+            "threshold": float(thresh),
+            "baseline_med": float(base_med),
+            "baseline_scale": float(base_scale),
+            "n_peaks": int(len(peaks)),
+            "n_accepted": int(len(accepted_peak_idx)),
             "peak_heights": (
                 props.get("peak_heights", np.array([])).tolist() if len(peaks) else []
             ),
         }
-        return peaks, new_clenches, info
+        return np.asarray(accepted_peak_idx, dtype=int), new_clenches, info

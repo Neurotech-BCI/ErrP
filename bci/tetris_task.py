@@ -281,7 +281,8 @@ def run_task(fname: str) -> None:  # noqa: C901
 
     jaw_ch_idx = len(model_ch_names) - 1
     jaw_detector = JawClenchDetector(fs=sfreq)
-    jaw_thresh_min = 5.0
+    jaw_detector.refractory = 0.75
+    jaw_thresh_min = 8.0
     jaw_calibration_duration_s = 5.0
 
     CELL = 0.085
@@ -584,10 +585,9 @@ def run_task(fname: str) -> None:  # noqa: C901
         # Jaw calibration happens immediately after SPACE, before the game appears.
         _draw_empty_board_screen(
             "Jaw calibration",
-            f"Clench steadily for {jaw_calibration_duration_s:.1f}s",
+            f"Keep jaw relaxed for {jaw_calibration_duration_s:.1f}s",
         )
         calib_raw: list[np.ndarray] = []
-        calib_ts: list[np.ndarray] = []
         last_cal_ts: float | None = None
         cal_clock = core.Clock()
         while cal_clock.getTime() < jaw_calibration_duration_s:
@@ -602,19 +602,19 @@ def run_task(fname: str) -> None:  # noqa: C901
                     new_ts = ts_arr[mask].astype(np.float64)
                     last_cal_ts = float(new_ts[-1])
                     calib_raw.append(new_data)
-                    calib_ts.append(new_ts)
             remaining = max(0.0, jaw_calibration_duration_s - cal_clock.getTime())
             _draw_empty_board_screen(
                 "Jaw calibration",
-                f"Clench steadily for {remaining:0.1f}s",
+                f"Keep jaw relaxed for {remaining:0.1f}s",
             )
 
-        if calib_raw and hasattr(jaw_detector, "calibrate"):
+        if calib_raw:
             try:
                 jaw_signal = np.concatenate(calib_raw).astype(np.float32)
-                jaw_detector.calibrate(jaw_signal)
+                floor = jaw_detector.calibrate(jaw_signal)
+                logger.info("Jaw detector calibrated: floor=%.3f", float(floor))
             except Exception:
-                pass
+                logger.warning("Jaw detector calibration failed, continuing with adaptive baseline.")
 
     except Exception:
         try:
@@ -641,6 +641,8 @@ def run_task(fname: str) -> None:  # noqa: C901
     stream_pull_s = max(0.10, task_cfg.live_update_interval_s * 2.0)
     reject_thresh = eeg_cfg.reject_peak_to_peak
     last_live_ts: float | None = None
+    jaw_buffer_raw = np.empty(0, dtype=np.float32)
+    jaw_buffer_ts = np.empty(0, dtype=np.float64)
 
     pred_clock = core.Clock()
     prediction_count = 0
@@ -653,21 +655,39 @@ def run_task(fname: str) -> None:  # noqa: C901
     latest_pred_code: int | None = None
     bias_offset = float(task_cfg.live_bias_offset) if bool(task_cfg.enable_live_bias_offset) else 0.0
 
-    def _poll_decoder() -> None:
-        nonlocal last_live_ts, live_buffer, prediction_count
-        nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note, latest_pred_code
+    def _pull_stream_and_update_buffers() -> None:
+        nonlocal last_live_ts, live_buffer, jaw_buffer_raw, jaw_buffer_ts
 
         data, ts = stream.get_data(winsize=stream_pull_s, picks="all")
-        if data.size > 0 and ts is not None and len(ts) > 0:
-            ts_arr = np.asarray(ts)
-            mask = np.ones_like(ts_arr, bool) if last_live_ts is None else (ts_arr > float(last_live_ts))
-            if np.any(mask):
-                x_new = np.asarray(data[:, mask], np.float32)
-                last_live_ts = float(ts_arr[mask][-1])
-                x_new_filt = live_filter.process(x_new)
-                live_buffer = np.concatenate((live_buffer, x_new_filt), axis=1)
-                if live_buffer.shape[1] > keep_n:
-                    live_buffer = live_buffer[:, -keep_n:]
+        if data.size == 0 or ts is None or len(ts) == 0:
+            return
+
+        ts_arr = np.asarray(ts)
+        mask = np.ones_like(ts_arr, bool) if last_live_ts is None else (ts_arr > float(last_live_ts))
+        if not np.any(mask):
+            return
+
+        x_new = np.asarray(data[:, mask], dtype=np.float32)
+        t_new = ts_arr[mask].astype(np.float64)
+        last_live_ts = float(t_new[-1])
+
+        x_new_filt = live_filter.process(x_new)
+        live_buffer = np.concatenate((live_buffer, x_new_filt), axis=1)
+        if live_buffer.shape[1] > keep_n:
+            live_buffer = live_buffer[:, -keep_n:]
+
+        jaw_raw_new = np.asarray(x_new[jaw_ch_idx], dtype=np.float32)
+        jaw_buffer_raw = np.concatenate((jaw_buffer_raw, jaw_raw_new))
+        jaw_buffer_ts = np.concatenate((jaw_buffer_ts, t_new))
+
+        keep = int(max(sfreq, window_n))
+        if jaw_buffer_raw.size > keep:
+            jaw_buffer_raw = jaw_buffer_raw[-keep:]
+            jaw_buffer_ts = jaw_buffer_ts[-keep:]
+
+    def _poll_decoder() -> None:
+        nonlocal prediction_count
+        nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note, latest_pred_code
 
         if pred_clock.getTime() < task_cfg.live_update_interval_s:
             return
@@ -702,35 +722,9 @@ def run_task(fname: str) -> None:  # noqa: C901
         prediction_count += 1
         live_note = "tracking"
 
-    last_jaw_ts: float | None = None
-    jaw_buffer_raw = np.empty(0, dtype=np.float32)
-    jaw_buffer_ts = np.empty(0, dtype=np.float64)
-    jaw_pull_s = max(0.10, task_cfg.live_update_interval_s * 2.0)
-
     def _poll_jaw_clench() -> bool:
-        nonlocal last_jaw_ts, jaw_buffer_raw, jaw_buffer_ts
-
-        data, ts = stream.get_data(winsize=jaw_pull_s, picks="all")
-        if data.size == 0 or ts is None or len(ts) == 0:
+        if jaw_buffer_raw.size < 8 or jaw_buffer_ts.size < 8:
             return False
-
-        ts_arr = np.asarray(ts)
-        mask = np.ones_like(ts_arr, bool) if last_jaw_ts is None else (ts_arr > float(last_jaw_ts))
-        if not np.any(mask):
-            return False
-
-        new_data = np.asarray(data[jaw_ch_idx, mask], dtype=np.float32)
-        new_ts = ts_arr[mask].astype(np.float64)
-        last_jaw_ts = float(new_ts[-1])
-
-        jaw_buffer_raw = np.concatenate([jaw_buffer_raw, new_data])
-        jaw_buffer_ts = np.concatenate([jaw_buffer_ts, new_ts])
-
-        keep = int(sfreq)
-        if jaw_buffer_raw.size > keep:
-            jaw_buffer_raw = jaw_buffer_raw[-keep:]
-            jaw_buffer_ts = jaw_buffer_ts[-keep:]
-
         _, clenches, _ = jaw_detector.detect(jaw_buffer_raw, jaw_buffer_ts, jaw_thresh_min)
         return len(clenches) > 0
 
@@ -783,6 +777,9 @@ def run_task(fname: str) -> None:  # noqa: C901
 
             live_filter.reset()
             live_buffer = np.empty((len(model_ch_names), 0), np.float32)
+            jaw_buffer_raw = np.empty(0, dtype=np.float32)
+            jaw_buffer_ts = np.empty(0, dtype=np.float64)
+            jaw_detector.reset_runtime_state()
             last_live_ts = None
             pred_clock.reset()
             prediction_count = 0
@@ -798,6 +795,7 @@ def run_task(fname: str) -> None:  # noqa: C901
                     if "escape" in event.getKeys():
                         raise KeyboardInterrupt
 
+                    _pull_stream_and_update_buffers()
                     _poll_decoder()
                     now = core.getTime()
 

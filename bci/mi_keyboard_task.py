@@ -230,7 +230,8 @@ def run_task(
 
     jaw_ch_idx = len(model_ch_names) - 1
     jaw_detector = JawClenchDetector(fs=sfreq)
-    jaw_thresh_min = 5.0
+    jaw_detector.refractory = max(0.60, float(jaw_select_refractory_s))
+    jaw_thresh_min = 8.0
     jaw_calibration_duration_s = 5.0
 
     win = visual.Window(
@@ -299,7 +300,7 @@ def run_task(
             _draw_frame()
 
     cue.text = "Jaw calibration"
-    info.text = "Clench steadily to set detector baseline."
+    info.text = "Keep your jaw relaxed to measure baseline activity."
     status.text = "Press SPACE to start calibration. ESC to quit."
     _wait_for_space("Jaw calibration")
 
@@ -319,14 +320,15 @@ def run_task(
                 calib_raw.append(new_data)
         remaining = max(0.0, jaw_calibration_duration_s - cal_clock.getTime())
         cue.text = "Jaw calibration"
-        info.text = f"Clench steadily for {remaining:0.1f}s"
+        info.text = f"Keep jaw relaxed for {remaining:0.1f}s"
         status.text = ""
         _draw_frame()
 
-    if calib_raw and hasattr(jaw_detector, "calibrate"):
+    if calib_raw:
         try:
             jaw_signal = np.concatenate(calib_raw).astype(np.float32)
-            jaw_detector.calibrate(jaw_signal)
+            floor = jaw_detector.calibrate(jaw_signal)
+            logger.info("Jaw detector calibrated: floor=%.3f", float(floor))
         except Exception:
             logger.warning("Jaw detector calibration method failed, continuing with adaptive threshold.")
 
