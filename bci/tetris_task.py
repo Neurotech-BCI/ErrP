@@ -504,7 +504,10 @@ def run_task(fname: str) -> None:  # noqa: C901
                         raise KeyboardInterrupt
                     if "space" in keys:
                         break
-                    win.flip()
+                    _draw_empty_board_screen(
+                        "REST calibration",
+                        "Press SPACE to start. ESC to quit.",
+                    )
 
                 rest_block = _collect_block_simple(float(task_cfg.rest_calibration_duration_s))
                 rest_wins = prepare_continuous_windows(
@@ -532,7 +535,10 @@ def run_task(fname: str) -> None:  # noqa: C901
                         raise KeyboardInterrupt
                     if "space" in keys:
                         break
-                    win.flip()
+                    _draw_empty_board_screen(
+                        "Live LR calibration",
+                        "Press SPACE to begin. ESC to quit.",
+                    )
 
                 online_cal_session_id = int(np.max(dataset.session_ids)) + 1
                 cal_codes = (
@@ -550,7 +556,7 @@ def run_task(fname: str) -> None:  # noqa: C901
                     while clk.getTime() < float(task_cfg.online_lr_calibration_prep_s):
                         if "escape" in event.getKeys():
                             raise KeyboardInterrupt
-                        win.flip()
+                        _draw_empty_board_screen(f"Prepare: {cname}", f"Block {idx}/{len(cal_codes)}")
 
                     _draw_empty_board_screen(f"SUSTAIN {cname}", "")
                     blk = _collect_block_simple(float(task_cfg.online_lr_calibration_hold_s))
@@ -571,7 +577,7 @@ def run_task(fname: str) -> None:  # noqa: C901
                     while clk2.getTime() < float(task_cfg.online_lr_calibration_iti_s):
                         if "escape" in event.getKeys():
                             raise KeyboardInterrupt
-                        win.flip()
+                        _draw_empty_board_screen("", "Relax")
 
                 if cal_windows_list:
                     X_on = np.concatenate(cal_windows_list, axis=0)
@@ -617,7 +623,10 @@ def run_task(fname: str) -> None:  # noqa: C901
                 raise KeyboardInterrupt
             if "space" in keys:
                 break
-            win.flip()
+            _draw_empty_board_screen(
+                f"Model ready  LOSO={loso.mean_accuracy:.3f}±{loso.std_accuracy:.3f}",
+                "Press SPACE to start. ESC to quit.",
+            )
 
         # Jaw calibration happens immediately after SPACE, before the game appears.
         _draw_empty_board_screen(
