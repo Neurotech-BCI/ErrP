@@ -290,14 +290,14 @@ def run_task(fname: str) -> None:  # noqa: C901
     BOARD_W = BOARD_COLS * CELL
     BOARD_H = BOARD_ROWS * CELL
     BOARD_LEFT = -BOARD_W / 2
-    BOARD_TOP = BOARD_H / 2
+    # Shift the board upward slightly to create more room for bottom status text.
+    BOARD_TOP = (BOARD_H / 2) + 0.03
 
-    # Use a larger window so the instruction area does not overlap the board.
     win = visual.Window(
-        size=(1280, 900),
+        size=task_cfg.win_size,
         color=(0.18, 0.18, 0.18),
         units="norm",
-        fullscr=False,
+        fullscr=task_cfg.fullscreen,
     )
 
     def cell_xy(row: int, col: int) -> tuple[float, float]:
@@ -337,9 +337,9 @@ def run_task(fname: str) -> None:  # noqa: C901
     txt_level = visual.TextStim(win, text="", pos=(0.72, 0.55), height=0.045, color=(0.70, 0.70, 0.70), anchorHoriz="center")
     txt_lines = visual.TextStim(win, text="", pos=(0.72, 0.42), height=0.045, color=(0.70, 0.70, 0.70), anchorHoriz="center")
     txt_next = visual.TextStim(win, text="NEXT", pos=(0.72, 0.28), height=0.040, color=(0.60, 0.60, 0.60), anchorHoriz="center")
-    txt_bci = visual.TextStim(win, text="", pos=(0, -0.88), height=0.038, color=(0.50, 0.80, 1.00), anchorHoriz="center")
-    txt_cue = visual.TextStim(win, text="", pos=(0, 0.95), height=0.050, color=(0.90, 0.90, 0.90), anchorHoriz="center")
-    txt_status = visual.TextStim(win, text="", pos=(0, -0.95), height=0.035, color=(0.70, 0.70, 0.70), anchorHoriz="center")
+    txt_bci = visual.TextStim(win, text="", pos=(0, -0.80), height=0.036, color=(0.50, 0.80, 1.00), anchorHoriz="center")
+    txt_cue = visual.TextStim(win, text="", pos=(0, 0.90), height=0.048, color=(0.90, 0.90, 0.90), anchorHoriz="center")
+    txt_status = visual.TextStim(win, text="", pos=(0, -0.90), height=0.035, color=(0.70, 0.70, 0.70), anchorHoriz="center")
 
     _next_rects = [
         visual.Rect(win, width=CELL * 0.85, height=CELL * 0.85, pos=(0, 0), fillColor=(0, 0, 0), lineColor=None)
