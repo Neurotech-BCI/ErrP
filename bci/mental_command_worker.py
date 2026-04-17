@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+import pickle
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -239,6 +243,17 @@ class LOSOResult:
     std_accuracy: float
 
 
+@dataclass
+class SharedMIModelResult:
+    classifier: Pipeline
+    class_index: dict[int, int]
+    loso: LOSOResult
+    class_counts: dict[int, int]
+    loaded_from_cache: bool
+    dataset: OfflineMIDataset | None
+    cache_path: str
+
+
 def canonicalize_channel_name(name: str) -> str:
     cleaned = str(name).strip()
     cleaned = cleaned.replace("EEG ", "")
@@ -462,6 +477,183 @@ def evaluate_loso_sessions(
         session_scores=session_scores,
         mean_accuracy=mean_accuracy,
         std_accuracy=std_accuracy,
+    )
+
+
+def _edf_manifest(data_dir: str, edf_glob: str, calibrate_on_participant: str) -> list[dict[str, int | str]]:
+    root = Path(data_dir).expanduser()
+    rows: list[dict[str, int | str]] = []
+    if not root.exists():
+        return rows
+    for p in sorted(root.rglob(edf_glob)):
+        if calibrate_on_participant and calibrate_on_participant not in str(p):
+            continue
+        st = p.stat()
+        rows.append(
+            {
+                "path": str(p.resolve()),
+                "size": int(st.st_size),
+                "mtime_ns": int(st.st_mtime_ns),
+            }
+        )
+    return rows
+
+
+def _shared_model_signature(
+    *,
+    data_dir: str,
+    edf_glob: str,
+    calibrate_on_participant: str,
+    eeg_cfg: EEGConfig,
+    task_cfg: MentalCommandTaskConfig,
+    stim_cfg: StimConfig,
+    model_cfg: MentalCommandModelConfig,
+    target_sfreq: float,
+    target_channel_names: list[str] | tuple[str, ...],
+) -> tuple[str, dict]:
+    payload = {
+        "schema_version": 1,
+        "data_dir": str(Path(data_dir).expanduser().resolve()),
+        "edf_glob": str(edf_glob),
+        "calibrate_on_participant": str(calibrate_on_participant),
+        "target_sfreq": round(float(target_sfreq), 6),
+        "target_channel_names": [canonicalize_channel_name(ch) for ch in target_channel_names],
+        "eeg_cfg": {
+            "picks": [canonicalize_channel_name(ch) for ch in eeg_cfg.picks],
+            "reref_channel": None if eeg_cfg.reref_channel is None else canonicalize_channel_name(eeg_cfg.reref_channel),
+            "l_freq": float(eeg_cfg.l_freq),
+            "h_freq": float(eeg_cfg.h_freq),
+            "notch": None if eeg_cfg.notch is None else float(eeg_cfg.notch),
+            "reject_peak_to_peak": None if eeg_cfg.reject_peak_to_peak is None else float(eeg_cfg.reject_peak_to_peak),
+        },
+        "task_cfg": {
+            "epoch_duration_s": float(task_cfg.epoch_duration_s),
+            "window_s": float(task_cfg.window_s),
+            "window_step_s": float(task_cfg.window_step_s),
+            "offline_eeg_scale_to_match_live": float(task_cfg.offline_eeg_scale_to_match_live),
+            "live_eeg_units": str(task_cfg.live_eeg_units),
+        },
+        "stim_cfg": {
+            "left_code": int(stim_cfg.left_code),
+            "right_code": int(stim_cfg.right_code),
+        },
+        "model_cfg": {
+            "cov_estimator": str(model_cfg.cov_estimator),
+        },
+        "edf_manifest": _edf_manifest(
+            data_dir=data_dir,
+            edf_glob=edf_glob,
+            calibrate_on_participant=calibrate_on_participant,
+        ),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest(), payload
+
+
+def train_or_load_shared_mi_model(
+    *,
+    cache_name: str,
+    data_dir: str,
+    edf_glob: str,
+    calibrate_on_participant: str,
+    eeg_cfg: EEGConfig,
+    task_cfg: MentalCommandTaskConfig,
+    stim_cfg: StimConfig,
+    model_cfg: MentalCommandModelConfig,
+    target_sfreq: float,
+    target_channel_names: list[str] | tuple[str, ...],
+    logger: logging.Logger | None = None,
+    force_retrain: bool = False,
+) -> SharedMIModelResult:
+    cache_dir = Path(__file__).resolve().parent / ".cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{cache_name}.pkl"
+
+    signature, _payload = _shared_model_signature(
+        data_dir=data_dir,
+        edf_glob=edf_glob,
+        calibrate_on_participant=calibrate_on_participant,
+        eeg_cfg=eeg_cfg,
+        task_cfg=task_cfg,
+        stim_cfg=stim_cfg,
+        model_cfg=model_cfg,
+        target_sfreq=target_sfreq,
+        target_channel_names=target_channel_names,
+    )
+
+    if not force_retrain and cache_path.exists():
+        try:
+            with open(cache_path, "rb") as fh:
+                cached = pickle.load(fh)
+            if cached.get("signature") == signature:
+                classifier = cached["classifier"]
+                clf_classes = np.asarray(classifier.named_steps["clf"].classes_, dtype=int)
+                class_index = {int(c): i for i, c in enumerate(clf_classes)}
+                loso = LOSOResult(
+                    session_scores={int(k): float(v) for k, v in cached.get("session_scores", {}).items()},
+                    mean_accuracy=float(cached.get("loso_mean", 0.0)),
+                    std_accuracy=float(cached.get("loso_std", 0.0)),
+                )
+                class_counts = {int(k): int(v) for k, v in cached.get("class_counts", {}).items()}
+                if logger is not None:
+                    logger.info("Loaded cached MI model from %s", str(cache_path))
+                return SharedMIModelResult(
+                    classifier=classifier,
+                    class_index=class_index,
+                    loso=loso,
+                    class_counts=class_counts,
+                    loaded_from_cache=True,
+                    dataset=None,
+                    cache_path=str(cache_path),
+                )
+        except Exception as exc:
+            if logger is not None:
+                logger.warning("Failed to load MI cache at %s: %s", str(cache_path), exc)
+
+    dataset = load_offline_mi_dataset(
+        data_dir=data_dir,
+        edf_glob=edf_glob,
+        eeg_cfg=eeg_cfg,
+        task_cfg=task_cfg,
+        stim_cfg=stim_cfg,
+        target_sfreq=float(target_sfreq),
+        target_channel_names=target_channel_names,
+        calibrateOnParticipant=calibrate_on_participant,
+    )
+    loso = evaluate_loso_sessions(dataset, model_cfg)
+    classifier = make_mi_classifier(model_cfg)
+    classifier.fit(dataset.X, dataset.y)
+
+    clf_classes = np.asarray(classifier.named_steps["clf"].classes_, dtype=int)
+    class_index = {int(c): i for i, c in enumerate(clf_classes)}
+    class_vals, class_n = np.unique(dataset.y, return_counts=True)
+    class_counts = {int(c): int(n) for c, n in zip(class_vals, class_n)}
+
+    try:
+        payload = {
+            "signature": signature,
+            "classifier": classifier,
+            "session_scores": {int(k): float(v) for k, v in loso.session_scores.items()},
+            "loso_mean": float(loso.mean_accuracy),
+            "loso_std": float(loso.std_accuracy),
+            "class_counts": class_counts,
+        }
+        with open(cache_path, "wb") as fh:
+            pickle.dump(payload, fh)
+        if logger is not None:
+            logger.info("Saved shared MI model cache to %s", str(cache_path))
+    except Exception as exc:
+        if logger is not None:
+            logger.warning("Failed to save MI cache at %s: %s", str(cache_path), exc)
+
+    return SharedMIModelResult(
+        classifier=classifier,
+        class_index=class_index,
+        loso=loso,
+        class_counts=class_counts,
+        loaded_from_cache=False,
+        dataset=dataset,
+        cache_path=str(cache_path),
     )
 
 def load_dataset_for_live_task(

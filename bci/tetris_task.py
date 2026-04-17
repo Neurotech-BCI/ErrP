@@ -28,6 +28,7 @@ from mental_command_worker import (
     make_mi_classifier,
     prepare_continuous_windows,
     resolve_channel_order,
+    train_or_load_shared_mi_model,
 )
 from jaw_clench_detector import JawClenchDetector
 
@@ -424,6 +425,10 @@ def run_task(fname: str) -> None:  # noqa: C901
     rest_session_id: int | None = None
     online_cal_session_id: int | None = None
     train_only_session_ids: set[int] = set()
+    use_shared_model_cache = (
+        not bool(task_cfg.enable_online_rest_calibration)
+        and not bool(task_cfg.enable_online_lr_calibration)
+    )
 
     _draw_empty_board_screen(
         "Preparing MI model...",
@@ -431,29 +436,42 @@ def run_task(fname: str) -> None:  # noqa: C901
     )
 
     try:
-        dataset = load_offline_mi_dataset(
-            data_dir=task_cfg.data_dir,
-            edf_glob=task_cfg.edf_glob,
-            eeg_cfg=eeg_cfg,
-            task_cfg=task_cfg,
-            stim_cfg=stim_cfg,
-            target_sfreq=sfreq,
-            target_channel_names=model_ch_names,
-            calibrateOnParticipant=task_cfg.calirate_on_participant,
-        )
-
-        if bool(task_cfg.enable_online_rest_calibration):
-            _draw_empty_board_screen(
-                "REST calibration",
-                "Press SPACE to start. ESC to quit.",
+        if use_shared_model_cache:
+            shared_model = train_or_load_shared_mi_model(
+                cache_name="mi_shared_lr_model",
+                data_dir=task_cfg.data_dir,
+                edf_glob=task_cfg.edf_glob,
+                calibrate_on_participant=task_cfg.calirate_on_participant,
+                eeg_cfg=eeg_cfg,
+                task_cfg=task_cfg,
+                stim_cfg=stim_cfg,
+                model_cfg=model_cfg,
+                target_sfreq=sfreq,
+                target_channel_names=model_ch_names,
+                logger=logger,
             )
-            while True:
-                keys = event.getKeys()
-                if "escape" in keys:
-                    raise KeyboardInterrupt
-                if "space" in keys:
-                    break
-                win.flip()
+            classifier = shared_model.classifier
+            class_index = shared_model.class_index
+            loso = shared_model.loso
+            counts = Counter(shared_model.class_counts)
+            logger.info(
+                "Model ready from shared cache: loso_mean=%.4f, loso_std=%.4f, class_counts=%s, cache=%s",
+                loso.mean_accuracy,
+                loso.std_accuracy,
+                counts,
+                shared_model.cache_path,
+            )
+        else:
+            dataset = load_offline_mi_dataset(
+                data_dir=task_cfg.data_dir,
+                edf_glob=task_cfg.edf_glob,
+                eeg_cfg=eeg_cfg,
+                task_cfg=task_cfg,
+                stim_cfg=stim_cfg,
+                target_sfreq=sfreq,
+                target_channel_names=model_ch_names,
+                calibrateOnParticipant=task_cfg.calirate_on_participant,
+            )
 
             def _collect_block_simple(dur: float) -> np.ndarray:
                 chunks: list[np.ndarray] = []
@@ -475,98 +493,117 @@ def run_task(fname: str) -> None:  # noqa: C901
                     )
                 return np.concatenate(chunks, axis=1) if chunks else np.empty((len(model_ch_names), 0), np.float32)
 
-            rest_block = _collect_block_simple(float(task_cfg.rest_calibration_duration_s))
-            rest_wins = prepare_continuous_windows(
-                raw_block=rest_block,
-                eeg_cfg=eeg_cfg,
-                sfreq=sfreq,
-                window_s=float(task_cfg.window_s),
-                step_s=float(task_cfg.window_step_s),
-                reject_peak_to_peak=eeg_cfg.reject_peak_to_peak,
-            )
-            if rest_wins.shape[0] > 0:
-                rest_session_id = -1
-                train_only_session_ids.add(rest_session_id)
-                rest_labels = np.full(rest_wins.shape[0], int(task_cfg.rest_class_code), dtype=int)
-                dataset = append_windows_to_dataset(dataset, rest_wins, rest_labels, rest_session_id, n_trials_add=1)
-
-        if bool(task_cfg.enable_online_lr_calibration):
-            _draw_empty_board_screen(
-                "Live LR calibration",
-                "Press SPACE to begin. ESC to quit.",
-            )
-            while True:
-                keys = event.getKeys()
-                if "escape" in keys:
-                    raise KeyboardInterrupt
-                if "space" in keys:
-                    break
-                win.flip()
-
-            online_cal_session_id = int(np.max(dataset.session_ids)) + 1
-            cal_codes = (
-                [int(stim_cfg.left_code)] * int(task_cfg.online_lr_calibration_reps_per_class)
-                + [int(stim_cfg.right_code)] * int(task_cfg.online_lr_calibration_reps_per_class)
-            )
-            random.shuffle(cal_codes)
-            cal_windows_list: list[np.ndarray] = []
-            cal_labels_list: list[np.ndarray] = []
-
-            for idx, code in enumerate(cal_codes, 1):
-                cname = label_cfg.left_name if int(code) == int(stim_cfg.left_code) else label_cfg.right_name
-                _draw_empty_board_screen(f"Prepare: {cname}", f"Block {idx}/{len(cal_codes)}")
-                clk = core.Clock()
-                while clk.getTime() < float(task_cfg.online_lr_calibration_prep_s):
-                    if "escape" in event.getKeys():
+            if bool(task_cfg.enable_online_rest_calibration):
+                _draw_empty_board_screen(
+                    "REST calibration",
+                    "Press SPACE to start. ESC to quit.",
+                )
+                while True:
+                    keys = event.getKeys()
+                    if "escape" in keys:
                         raise KeyboardInterrupt
+                    if "space" in keys:
+                        break
                     win.flip()
 
-                _draw_empty_board_screen(f"SUSTAIN {cname}", "")
-                blk = _collect_block_simple(float(task_cfg.online_lr_calibration_hold_s))
-                wins = prepare_continuous_windows(
-                    raw_block=blk,
+                rest_block = _collect_block_simple(float(task_cfg.rest_calibration_duration_s))
+                rest_wins = prepare_continuous_windows(
+                    raw_block=rest_block,
                     eeg_cfg=eeg_cfg,
                     sfreq=sfreq,
                     window_s=float(task_cfg.window_s),
                     step_s=float(task_cfg.window_step_s),
                     reject_peak_to_peak=eeg_cfg.reject_peak_to_peak,
                 )
-                if wins.shape[0] > 0:
-                    cal_windows_list.append(wins)
-                    cal_labels_list.append(np.full(wins.shape[0], int(code), dtype=int))
+                if rest_wins.shape[0] > 0:
+                    rest_session_id = -1
+                    train_only_session_ids.add(rest_session_id)
+                    rest_labels = np.full(rest_wins.shape[0], int(task_cfg.rest_class_code), dtype=int)
+                    dataset = append_windows_to_dataset(dataset, rest_wins, rest_labels, rest_session_id, n_trials_add=1)
 
-                _draw_empty_board_screen("", "Relax")
-                clk2 = core.Clock()
-                while clk2.getTime() < float(task_cfg.online_lr_calibration_iti_s):
-                    if "escape" in event.getKeys():
+            if bool(task_cfg.enable_online_lr_calibration):
+                _draw_empty_board_screen(
+                    "Live LR calibration",
+                    "Press SPACE to begin. ESC to quit.",
+                )
+                while True:
+                    keys = event.getKeys()
+                    if "escape" in keys:
                         raise KeyboardInterrupt
+                    if "space" in keys:
+                        break
                     win.flip()
 
-            if cal_windows_list:
-                X_on = np.concatenate(cal_windows_list, axis=0)
-                y_on = np.concatenate(cal_labels_list, axis=0)
-                dataset = append_windows_to_dataset(
-                    dataset=dataset,
-                    windows=X_on,
-                    labels=y_on,
-                    session_id=online_cal_session_id,
-                    n_trials_add=len(cal_codes),
+                online_cal_session_id = int(np.max(dataset.session_ids)) + 1
+                cal_codes = (
+                    [int(stim_cfg.left_code)] * int(task_cfg.online_lr_calibration_reps_per_class)
+                    + [int(stim_cfg.right_code)] * int(task_cfg.online_lr_calibration_reps_per_class)
                 )
+                random.shuffle(cal_codes)
+                cal_windows_list: list[np.ndarray] = []
+                cal_labels_list: list[np.ndarray] = []
 
-        loso = evaluate_loso_sessions(dataset, model_cfg, train_only_session_ids=train_only_session_ids)
-        classifier = make_mi_classifier(model_cfg)
-        classifier.fit(dataset.X, dataset.y)
+                for idx, code in enumerate(cal_codes, 1):
+                    cname = label_cfg.left_name if int(code) == int(stim_cfg.left_code) else label_cfg.right_name
+                    _draw_empty_board_screen(f"Prepare: {cname}", f"Block {idx}/{len(cal_codes)}")
+                    clk = core.Clock()
+                    while clk.getTime() < float(task_cfg.online_lr_calibration_prep_s):
+                        if "escape" in event.getKeys():
+                            raise KeyboardInterrupt
+                        win.flip()
+
+                    _draw_empty_board_screen(f"SUSTAIN {cname}", "")
+                    blk = _collect_block_simple(float(task_cfg.online_lr_calibration_hold_s))
+                    wins = prepare_continuous_windows(
+                        raw_block=blk,
+                        eeg_cfg=eeg_cfg,
+                        sfreq=sfreq,
+                        window_s=float(task_cfg.window_s),
+                        step_s=float(task_cfg.window_step_s),
+                        reject_peak_to_peak=eeg_cfg.reject_peak_to_peak,
+                    )
+                    if wins.shape[0] > 0:
+                        cal_windows_list.append(wins)
+                        cal_labels_list.append(np.full(wins.shape[0], int(code), dtype=int))
+
+                    _draw_empty_board_screen("", "Relax")
+                    clk2 = core.Clock()
+                    while clk2.getTime() < float(task_cfg.online_lr_calibration_iti_s):
+                        if "escape" in event.getKeys():
+                            raise KeyboardInterrupt
+                        win.flip()
+
+                if cal_windows_list:
+                    X_on = np.concatenate(cal_windows_list, axis=0)
+                    y_on = np.concatenate(cal_labels_list, axis=0)
+                    dataset = append_windows_to_dataset(
+                        dataset=dataset,
+                        windows=X_on,
+                        labels=y_on,
+                        session_id=online_cal_session_id,
+                        n_trials_add=len(cal_codes),
+                    )
+
+            loso = evaluate_loso_sessions(dataset, model_cfg, train_only_session_ids=train_only_session_ids)
+            classifier = make_mi_classifier(model_cfg)
+            classifier.fit(dataset.X, dataset.y)
+            counts = Counter(dataset.y.tolist())
+            logger.info(
+                "Model ready: windows=%d, loso_mean=%.4f, loso_std=%.4f, class_counts=%s",
+                dataset.n_windows,
+                loso.mean_accuracy,
+                loso.std_accuracy,
+                counts,
+            )
+
         clf_classes = np.asarray(classifier.named_steps["clf"].classes_, dtype=int)
         class_index = {int(c): i for i, c in enumerate(clf_classes)}
+        if int(stim_cfg.left_code) not in class_index or int(stim_cfg.right_code) not in class_index:
+            raise RuntimeError(
+                f"Classifier classes {clf_classes.tolist()} do not contain expected left/right codes "
+                f"{[int(stim_cfg.left_code), int(stim_cfg.right_code)]}."
+            )
 
-        counts = Counter(dataset.y.tolist())
-        logger.info(
-            "Model ready: windows=%d, loso_mean=%.4f, loso_std=%.4f, class_counts=%s",
-            dataset.n_windows,
-            loso.mean_accuracy,
-            loso.std_accuracy,
-            counts,
-        )
         with open(f"{fname}_tetris_model.pkl", "wb") as fh:
             pickle.dump(classifier, fh)
 

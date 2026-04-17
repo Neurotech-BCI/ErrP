@@ -22,10 +22,8 @@ from jaw_clench_detector import JawClenchDetector
 from mental_command_worker import (
     StreamingIIRFilter,
     canonicalize_channel_name,
-    evaluate_loso_sessions,
-    load_offline_mi_dataset,
-    make_mi_classifier,
     resolve_channel_order,
+    train_or_load_shared_mi_model,
 )
 
 
@@ -189,42 +187,54 @@ def run_task(
         task_cfg.window_s,
         task_cfg.window_step_s,
     )
-    dataset = load_offline_mi_dataset(
+    shared_model = train_or_load_shared_mi_model(
+        cache_name="mi_shared_lr_model",
         data_dir=task_cfg.data_dir,
         edf_glob=task_cfg.edf_glob,
+        calibrate_on_participant=task_cfg.calirate_on_participant,
         eeg_cfg=eeg_cfg,
         task_cfg=task_cfg,
         stim_cfg=stim_cfg,
+        model_cfg=model_cfg,
         target_sfreq=float(sfreq),
         target_channel_names=model_ch_names,
-        calibrateOnParticipant=task_cfg.calirate_on_participant,
+        logger=logger,
     )
-    loso = evaluate_loso_sessions(dataset, model_cfg)
-    classifier = make_mi_classifier(model_cfg)
-    classifier.fit(dataset.X, dataset.y)
+    classifier = shared_model.classifier
+    class_index = shared_model.class_index
+    loso = shared_model.loso
 
     clf_classes = np.asarray(classifier.named_steps["clf"].classes_, dtype=int)
-    class_index = {int(c): i for i, c in enumerate(clf_classes)}
     if int(stim_cfg.left_code) not in class_index or int(stim_cfg.right_code) not in class_index:
         raise RuntimeError(
             f"Classifier classes {clf_classes.tolist()} do not contain expected left/right codes "
             f"{[int(stim_cfg.left_code), int(stim_cfg.right_code)]}."
         )
 
-    counts = Counter(dataset.y.tolist())
-    logger.info(
-        "Offline dataset ready: files_used=%d/%d, trials=%d, windows=%d, class_counts=%s, loso_mean=%.4f, loso_std=%.4f",
-        dataset.n_files_used,
-        dataset.n_files_found,
-        dataset.n_trials,
-        dataset.n_windows,
-        counts,
-        loso.mean_accuracy,
-        loso.std_accuracy,
-    )
+    counts = Counter(shared_model.class_counts)
+    if shared_model.dataset is not None:
+        dataset = shared_model.dataset
+        logger.info(
+            "Offline dataset ready: files_used=%d/%d, trials=%d, windows=%d, class_counts=%s, loso_mean=%.4f, loso_std=%.4f",
+            dataset.n_files_used,
+            dataset.n_files_found,
+            dataset.n_trials,
+            dataset.n_windows,
+            counts,
+            loso.mean_accuracy,
+            loso.std_accuracy,
+        )
+        np.save(f"{fname}_mi_keyboard_windows.npy", dataset.X)
+        np.save(f"{fname}_mi_keyboard_labels.npy", dataset.y)
+    else:
+        logger.info(
+            "Using shared cached MI model: class_counts=%s, loso_mean=%.4f, loso_std=%.4f, cache=%s",
+            counts,
+            loso.mean_accuracy,
+            loso.std_accuracy,
+            shared_model.cache_path,
+        )
 
-    np.save(f"{fname}_mi_keyboard_windows.npy", dataset.X)
-    np.save(f"{fname}_mi_keyboard_labels.npy", dataset.y)
     with open(f"{fname}_mi_keyboard_model.pkl", "wb") as fh:
         pickle.dump(classifier, fh)
 
