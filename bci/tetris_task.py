@@ -11,6 +11,7 @@ import numpy as np
 from psychopy import core, event, visual
 from mne_lsl.stream import StreamLSL
 
+
 from config import (
     EEGConfig,
     LSLConfig,

@@ -80,7 +80,64 @@ class JawClenchDetector:
         self.recent_clenches.clear()
 
     def calibrate(self, signal: np.ndarray) -> float:
-        """Prime baseline statistics from a short relaxed jaw segment."""
+        """
+        calibrate a personalized jaw-clench threshold from a recording where the
+        user intentionally clenches about 5 times with short rests in between.
+        """
+        x = np.asarray(signal, dtype=float)
+        if x.size < 8:
+            return self.calibrated_floor
+
+        env = self._envelope(self._bandpass(x, 20.0, 45.0))
+        env = np.asarray(env, dtype=float)
+        env = env[np.isfinite(env)]
+        if env.size < 8:
+            return self.calibrated_floor
+
+        min_width = max(1, int(round(self.min_peak_width_s * self.fs)))
+        max_width = max(min_width, int(round(self.max_peak_width_s * self.fs)))
+        min_dist = max(1, int(round(self.min_peak_distance_s * self.fs)))
+
+        loose_thresh = float(np.percentile(env, 70))
+        prominence = max(float(np.std(env)) * 0.25, 1e-6)
+
+        peaks, props = find_peaks(
+            env,
+            height=loose_thresh,
+            width=(min_width, max_width),
+            distance=min_dist,
+            prominence=prominence,
+        )
+
+        peak_heights = np.asarray(props.get("peak_heights", []), dtype=float)
+        if peak_heights.size == 0:
+            return self.calibrated_floor
+
+        peak_heights = np.sort(peak_heights)[::-1]
+        top_peaks = peak_heights[:5] if peak_heights.size >= 5 else peak_heights
+
+        # estimate personalized clench amplitude.
+        clench_med = float(np.median(top_peaks))
+        clench_p25 = float(np.percentile(top_peaks, 25))
+
+        #set threshold below the typical clench amplitude.
+        # use a conservative fraction so weaker clenches still cross threshold.
+        floor = max(
+            0.40 * clench_med,
+            0.55 * clench_p25,
+        )
+
+        self.calibrated_floor = float(floor)
+
+        env_med, env_scale = self._robust_stats(env)
+        clench_z = (top_peaks - env_med) / max(env_scale, 1e-9)
+        if clench_z.size > 0:
+            self.peak_z = max(2.5, float(np.percentile(clench_z, 20)) * 0.6)
+
+        return self.calibrated_floor
+        """
+    def calibrate(self, signal: np.ndarray) -> float:
+        Prime baseline statistics from a short relaxed jaw segment.
         x = np.asarray(signal, dtype=float)
         if x.size < 8:
             return self.calibrated_floor
@@ -100,7 +157,7 @@ class JawClenchDetector:
         floor = max(base_med + 4.0 * base_scale, float(np.percentile(env, 70)) * 0.45)
         self.calibrated_floor = max(self.calibrated_floor, float(floor))
         return self.calibrated_floor
-
+"""
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
