@@ -652,7 +652,7 @@ def run_task(fname: str) -> None:  # noqa: C901
             remaining = max(0.0, jaw_calibration_duration_s - cal_clock.getTime())
             _draw_empty_board_screen(
                 "Jaw calibration",
-                f"Keep jaw relaxed for {remaining:0.1f}s",
+                f"Clench your jaw five times with gaps in between",
             )
 
         if calib_raw:
