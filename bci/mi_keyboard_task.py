@@ -535,7 +535,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cursor-step-s",
         type=float,
-        default=0.22,
+        default=0.35,
         help="Minimum time between cursor moves when MI confidence is above threshold",
     )
     parser.add_argument(
