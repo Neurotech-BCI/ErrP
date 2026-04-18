@@ -70,6 +70,15 @@ def _wrap_angle(angle: float) -> float:
     return float((angle + math.pi) % (2.0 * math.pi) - math.pi)
 
 
+def _apply_deadband(value: float, deadband: float) -> float:
+    value = float(np.clip(value, -1.0, 1.0))
+    deadband = float(np.clip(deadband, 0.0, 0.99))
+    if abs(value) <= deadband:
+        return 0.0
+    scaled = (abs(value) - deadband) / (1.0 - deadband)
+    return float(math.copysign(scaled, value))
+
+
 def _sample_target_position(
     rng: np.random.Generator,
     x_limit: float,
@@ -344,9 +353,9 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
 
     # Per your spec: rotation is only applied while paused.
     is_paused = True
-    rotation_dir = 1.0
-    manual_rotation_dir = 1.0
-    rotation_speed_rad_s = math.radians(float(task_cfg.max_turn_rate_deg_s) * 0.60)
+    manual_command = 0.0
+    steering_state = 0.0
+    rotation_speed_rad_s = math.radians(float(task_cfg.max_turn_rate_deg_s))
     heading_rad = math.pi / 2.0
 
     if stream is not None:
@@ -548,7 +557,6 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
     def _poll_live() -> None:
         nonlocal last_live_ts, live_buffer, jaw_buffer, prediction_count
         nonlocal left_prob, right_prob, raw_command, ema_command, latest_pred_code, live_note
-        nonlocal rotation_dir
         nonlocal jaw_prob, jaw_prev_pred
 
         if stream is None or live_filter is None:
@@ -620,12 +628,6 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
         else:
             latest_pred_code = int(stim_cfg.left_code)
 
-        if not debug_mode and is_paused:
-            if latest_pred_code == int(stim_cfg.left_code):
-                rotation_dir = -1.0
-            elif latest_pred_code == int(stim_cfg.right_code):
-                rotation_dir = 1.0
-
         prediction_count += 1
         live_note = "tracking"
 
@@ -664,9 +666,11 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
 
             if debug_mode and is_paused:
                 if "left" in keys:
-                    manual_rotation_dir = -1.0
+                    manual_command = -1.0
                 if "right" in keys:
-                    manual_rotation_dir = 1.0
+                    manual_command = 1.0
+                if "down" in keys:
+                    manual_command = 0.0
 
             _poll_live()
 
@@ -674,10 +678,18 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
             dt = float(np.clip(now_t - last_frame_t, 1e-4, 0.05))
             last_frame_t = now_t
 
-            active_dir = manual_rotation_dir if debug_mode else rotation_dir
+            command_drive = manual_command if debug_mode else _apply_deadband(ema_command, float(task_cfg.command_deadband))
+            if task_cfg.steering_time_constant_s <= 1e-6:
+                steering_state = command_drive
+            else:
+                blend = float(np.clip(dt / task_cfg.steering_time_constant_s, 0.0, 1.0))
+                steering_state += (command_drive - steering_state) * blend
+
             # Rotate heading only while paused.
             if is_paused:
-                heading_rad = _wrap_angle(heading_rad + active_dir * rotation_speed_rad_s * dt)
+                # Same steering sign convention as mi_cursor_task:
+                # positive command (= RIGHT) rotates clockwise.
+                heading_rad = _wrap_angle(heading_rad - rotation_speed_rad_s * steering_state * dt)
             else:
                 # Move the cursor in the heading selected while paused.
                 cursor_pos[0] += math.cos(heading_rad) * move_speed_norm_s * dt
@@ -706,7 +718,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
                 f"raw={raw_command:+.2f}   ema={ema_command:+.2f}"
             )
             status.text = (
-                f"pred={latest_pred_code}   dir={active_dir:+.0f}   updates={prediction_count}   "
+                f"pred={latest_pred_code}   steer={steering_state:+.2f}   updates={prediction_count}   "
                 f"jaw_p={jaw_prob:.2f}   targets={target_hits}   {live_note}"
             )
             _draw_frame()

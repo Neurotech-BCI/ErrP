@@ -115,16 +115,35 @@ def run_task(fname: str) -> None:  # noqa: C901
         fullscr=task_cfg.fullscreen,
     )
 
+    road_top_y = 0.95
+    road_bottom_y = -0.95
+    road_half_top = 0.42
+    road_half_bottom = 0.78
+
     road = visual.ShapeStim(
         win,
-        vertices=[(-0.78, -0.95), (0.78, -0.95), (0.42, 0.95), (-0.42, 0.95)],
+        vertices=[(-road_half_bottom, road_bottom_y), (road_half_bottom, road_bottom_y), (road_half_top, road_top_y), (-road_half_top, road_top_y)],
         closeShape=True,
         fillColor=(0.18, 0.18, 0.20),
         lineColor=(0.26, 0.26, 0.30),
         lineWidth=2,
     )
-    lane_line_l = visual.Line(win, start=(-0.25, -0.95), end=(-0.14, 0.95), lineColor=(0.35, 0.35, 0.40), lineWidth=2)
-    lane_line_r = visual.Line(win, start=(0.25, -0.95), end=(0.14, 0.95), lineColor=(0.35, 0.35, 0.40), lineWidth=2)
+    lane_div_bottom = road_half_bottom / 3.0
+    lane_div_top = road_half_top / 3.0
+    lane_line_l = visual.Line(
+        win,
+        start=(-lane_div_bottom, road_bottom_y),
+        end=(-lane_div_top, road_top_y),
+        lineColor=(0.35, 0.35, 0.40),
+        lineWidth=2,
+    )
+    lane_line_r = visual.Line(
+        win,
+        start=(lane_div_bottom, road_bottom_y),
+        end=(lane_div_top, road_top_y),
+        lineColor=(0.35, 0.35, 0.40),
+        lineWidth=2,
+    )
 
     # Pre-allocate obstacle rects for speed.
     MAX_OBS = 20
@@ -143,13 +162,16 @@ def run_task(fname: str) -> None:  # noqa: C901
     txt_info = visual.TextStim(win, text="", pos=(0, -0.78), height=0.035, color=(0.56, 0.82, 1.00), anchorHoriz="center")
     txt_status = visual.TextStim(win, text="", pos=(0, -0.88), height=0.034, color=(0.78, 0.78, 0.78), anchorHoriz="center")
 
-    lane_offsets = (-0.33, 0.0, 0.33)
     player_base_y = -0.74
 
+    def road_half_width(y_pos: float) -> float:
+        y = float(np.clip(y_pos, road_bottom_y, road_top_y))
+        return float(np.interp(y, [road_bottom_y, road_top_y], [road_half_bottom, road_half_top]))
+
     def lane_to_x(lane_idx: int, y_pos: float) -> float:
-        # Perspective compression: lanes converge near the horizon.
-        scale = float(np.interp(y_pos, [-0.95, 0.95], [1.0, 0.44]))
-        return lane_offsets[lane_idx] * scale
+        # Lane centers are at +/- 2/3 of half-width for a 3-lane road.
+        lane_unit = int(lane_idx) - 1
+        return lane_unit * (2.0 / 3.0) * road_half_width(y_pos)
 
     def _draw_wait_screen(cue: str, status: str, info: str = "") -> None:
         road.draw()
@@ -187,9 +209,9 @@ def run_task(fname: str) -> None:  # noqa: C901
             y = float(ob["y"])
             lane = int(ob["lane"])
             x = lane_to_x(lane, y)
-            depth_scale = float(np.interp(y, [-0.95, 0.95], [1.0, 0.45]))
-            w = 0.16 * depth_scale + 0.06
-            h = 0.06 * depth_scale + 0.03
+            lane_w = (2.0 * road_half_width(y)) / 3.0
+            w = max(0.08, lane_w * 0.72)
+            h = max(0.05, lane_w * 0.56)
             r = obs_rects[i]
             r.pos = (x, y)
             r.width = w
