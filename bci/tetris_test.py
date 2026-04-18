@@ -31,7 +31,7 @@ from mental_command_worker import (
     resolve_channel_order,
     train_or_load_shared_mi_model,
 )
-from jaw_clench_detector import JawClenchDetector
+from test_jaw_clench_detector import JawClenchDetector
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +430,104 @@ def run_task(fname: str) -> None:  # noqa: C901
         not bool(task_cfg.enable_online_rest_calibration)
         and not bool(task_cfg.enable_online_lr_calibration)
     )
+    def _wait_for_space_screen(cue: str, status: str = "") -> None:
+        while True:
+            keys = event.getKeys()
+            if "escape" in keys:
+                raise KeyboardInterrupt
+            if "space" in keys:
+                return
+            _draw_empty_board_screen(cue, status)
+
+    def _wait_seconds_screen(duration_s: float, cue: str, status_fn=None) -> None:
+        clk = core.Clock()
+        while clk.getTime() < duration_s:
+            if "escape" in event.getKeys():
+                raise KeyboardInterrupt
+            status = status_fn(clk.getTime()) if status_fn is not None else ""
+            _draw_empty_board_screen(cue, status)
+
+    def _collect_jaw_block(duration_s: float) -> np.ndarray:
+        """
+        Collect 1D raw data from the chosen jaw-sensitive channel.
+        """
+        chunks: list[np.ndarray] = []
+        last_ts_local: float | None = None
+        clk = core.Clock()
+
+        while clk.getTime() < duration_s:
+            if "escape" in event.getKeys():
+                raise KeyboardInterrupt
+
+            data, ts = stream.get_data(winsize=min(0.20, duration_s), picks="all")
+            if data.size > 0 and ts is not None and len(ts) > 0:
+                ts_arr = np.asarray(ts)
+                mask = np.ones_like(ts_arr, dtype=bool) if last_ts_local is None else (ts_arr > float(last_ts_local))
+                if np.any(mask):
+                    chunks.append(np.asarray(data[jaw_ch_idx, mask], dtype=np.float32))
+                    last_ts_local = float(ts_arr[mask][-1])
+
+            remaining = max(0.0, duration_s - clk.getTime())
+            _draw_empty_board_screen(
+                "Jaw calibration",
+                f"Recording... {remaining:0.1f}s",
+            )
+
+        if not chunks:
+            return np.empty(0, dtype=np.float32)
+        return np.concatenate(chunks).astype(np.float32, copy=False)
+
+    def _run_jaw_calibration_ui() -> float:
+        """
+        UI-driven jaw calibration for Tetris:
+        collects several intentional clench trials and fits threshold from them.
+        """
+        n_trials = 5
+        prep_s = 2.0
+        hold_s = 1.5
+        iti_s = 1.2
+
+        _wait_for_space_screen(
+            "Jaw calibration",
+            "Press SPACE to begin. You will clench your jaw 5 times.",
+        )
+
+        clench_blocks: list[np.ndarray] = []
+
+        for i in range(n_trials):
+            trial_num = i + 1
+
+            _wait_seconds_screen(
+                prep_s,
+                "Prepare",
+                lambda t: f"Jaw clench trial {trial_num}/{n_trials} starts in {max(0.0, prep_s - t):0.1f}s",
+            )
+
+            _draw_empty_board_screen(
+                "JAW CLENCH",
+                f"Trial {trial_num}/{n_trials}: clench and hold",
+            )
+            block = _collect_jaw_block(hold_s)
+            if block.size > 0:
+                clench_blocks.append(block)
+
+            _wait_seconds_screen(
+                iti_s,
+                "Relax",
+                lambda t: f"Rest before next trial: {max(0.0, iti_s - t):0.1f}s",
+            )
+
+        if not clench_blocks:
+            raise RuntimeError("Jaw calibration failed: no usable clench trials collected.")
+
+        jaw_signal = np.concatenate(clench_blocks).astype(np.float32, copy=False)
+        floor = jaw_detector.calibrate(jaw_signal)
+
+        _wait_for_space_screen(
+            "Calibration complete",
+            f"Jaw detector ready. Threshold floor = {floor:.2f}. Press SPACE to start Tetris.",
+        )
+        return float(floor)
 
     _draw_empty_board_screen(
         "Preparing MI model...",
@@ -630,38 +728,11 @@ def run_task(fname: str) -> None:  # noqa: C901
             )
 
         # Jaw calibration happens immediately after SPACE, before the game appears.
-        _draw_empty_board_screen(
-            "Jaw calibration",
-            f"Keep jaw relaxed for {jaw_calibration_duration_s:.1f}s",
-        )
-        calib_raw: list[np.ndarray] = []
-        last_cal_ts: float | None = None
-        cal_clock = core.Clock()
-        while cal_clock.getTime() < jaw_calibration_duration_s:
-            if "escape" in event.getKeys():
-                raise KeyboardInterrupt
-            data, ts = stream.get_data(winsize=0.25, picks="all")
-            if data.size > 0 and ts is not None and len(ts) > 0:
-                ts_arr = np.asarray(ts)
-                mask = np.ones_like(ts_arr, bool) if last_cal_ts is None else (ts_arr > float(last_cal_ts))
-                if np.any(mask):
-                    new_data = np.asarray(data[jaw_ch_idx, mask], dtype=np.float32)
-                    new_ts = ts_arr[mask].astype(np.float64)
-                    last_cal_ts = float(new_ts[-1])
-                    calib_raw.append(new_data)
-            remaining = max(0.0, jaw_calibration_duration_s - cal_clock.getTime())
-            _draw_empty_board_screen(
-                "Jaw calibration",
-                f"Clench your jaw five times with gaps in between",
-            )
-
-        if calib_raw:
-            try:
-                jaw_signal = np.concatenate(calib_raw).astype(np.float32)
-                floor = jaw_detector.calibrate(jaw_signal)
-                logger.info("Jaw detector calibrated: floor=%.3f", float(floor))
-            except Exception:
-                logger.warning("Jaw detector calibration failed, continuing with adaptive baseline.")
+        try:
+            floor = _run_jaw_calibration_ui()
+            logger.info("Jaw detector calibrated: floor=%.3f", float(floor))
+        except Exception:
+            logger.warning("Jaw detector calibration failed, continuing with adaptive baseline.")
 
     except Exception:
         try:
