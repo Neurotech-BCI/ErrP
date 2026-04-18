@@ -16,8 +16,8 @@ class JawClenchDetector:
         self.recent_horizon_s = 3.0
 
         # Peak constraints.
-        self.min_peak_width_s = 0.035
-        self.max_peak_width_s = 0.35
+        self.min_peak_width_s = 0.2
+        self.max_peak_width_s = 0.6
         self.min_peak_distance_s = 0.18
 
         # Robust threshold controls.
@@ -88,7 +88,7 @@ class JawClenchDetector:
         if x.size < 8:
             return self.calibrated_floor
 
-        env = self._envelope(self._bandpass(x, 20.0, 45.0))
+        env = self._envelope(self._bandpass(x, 25.0, 60.0))
         env = np.asarray(env, dtype=float)
         env = env[np.isfinite(env)]
         if env.size < 8:
