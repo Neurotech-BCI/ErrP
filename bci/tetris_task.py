@@ -10,6 +10,9 @@ from typing import Optional
 import numpy as np
 from psychopy import core, event, visual
 from mne_lsl.stream import StreamLSL
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 
 from config import (
@@ -31,7 +34,6 @@ from mental_command_worker import (
     resolve_channel_order,
     train_or_load_shared_mi_model,
 )
-from jaw_clench_detector import JawClenchDetector
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +135,37 @@ def _prompt_prefix() -> str:
         if p:
             return f"{datetime.now().strftime('%m_%d_%y')}_{p}_tetris"
         print("Name cannot be empty.")
+
+
+def _select_jaw_channel_indices(ch_names: list[str]) -> list[int]:
+    priority = {"FP1", "FP2", "AF3", "AF4", "F7", "F8", "F3", "F4"}
+    idxs = [i for i, name in enumerate(ch_names) if canonicalize_channel_name(name) in priority]
+    if idxs:
+        return idxs
+    return list(range(len(ch_names)))
+
+
+def _extract_jaw_features(block: np.ndarray, jaw_idxs: list[int]) -> np.ndarray:
+    X = np.asarray(block, dtype=np.float32)
+    if X.ndim != 2:
+        raise ValueError(f"Expected shape (n_channels, n_samples), got {X.shape}")
+    if X.shape[1] < 2:
+        return np.zeros(12, dtype=np.float32)
+
+    if jaw_idxs:
+        X = X[jaw_idxs]
+
+    X = X - np.mean(X, axis=1, keepdims=True)
+    ptp = np.ptp(X, axis=1)
+    rms = np.sqrt(np.mean(np.square(X), axis=1))
+    mav = np.mean(np.abs(X), axis=1)
+    line_len = np.mean(np.abs(np.diff(X, axis=1)), axis=1)
+
+    def _summary(v: np.ndarray) -> list[float]:
+        return [float(np.mean(v)), float(np.max(v)), float(np.std(v))]
+
+    features = _summary(ptp) + _summary(rms) + _summary(mav) + _summary(line_len)
+    return np.asarray(features, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -281,11 +314,14 @@ def run_task(fname: str) -> None:  # noqa: C901
     stream_ch_names = list(stream.info["ch_names"])
     logger.info("Channels: sfreq=%.1f  selected=%s  missing=%s", sfreq, stream_ch_names, missing)
 
-    jaw_ch_idx = len(model_ch_names) - 1
-    jaw_detector = JawClenchDetector(fs=sfreq)
-    jaw_detector.refractory = 0.75
-    jaw_thresh_min = 8.0
-    jaw_calibration_duration_s = 10.0
+    jaw_idxs = _select_jaw_channel_indices(model_ch_names)
+    jaw_classifier = None
+    jaw_prob = 0.0
+    jaw_prev_pred = 0
+    jaw_event_pending = False
+    jaw_prob_thresh = 0.70
+    jaw_refractory_s = 0.70
+    jaw_last_trigger_t = -1e9
 
     CELL = 0.085
     BOARD_W = BOARD_COLS * CELL
@@ -629,39 +665,128 @@ def run_task(fname: str) -> None:  # noqa: C901
                 "Press SPACE to start. ESC to quit.",
             )
 
-        # Jaw calibration happens immediately after SPACE, before the game appears.
-        _draw_empty_board_screen(
-            "Jaw calibration",
-            f"Keep jaw relaxed for {jaw_calibration_duration_s:.1f}s",
-        )
-        calib_raw: list[np.ndarray] = []
-        last_cal_ts: float | None = None
-        cal_clock = core.Clock()
-        while cal_clock.getTime() < jaw_calibration_duration_s:
-            if "escape" in event.getKeys():
-                raise KeyboardInterrupt
-            data, ts = stream.get_data(winsize=0.25, picks="all")
-            if data.size > 0 and ts is not None and len(ts) > 0:
-                ts_arr = np.asarray(ts)
-                mask = np.ones_like(ts_arr, bool) if last_cal_ts is None else (ts_arr > float(last_cal_ts))
-                if np.any(mask):
-                    new_data = np.asarray(data[jaw_ch_idx, mask], dtype=np.float32)
-                    new_ts = ts_arr[mask].astype(np.float64)
-                    last_cal_ts = float(new_ts[-1])
-                    calib_raw.append(new_data)
-            remaining = max(0.0, jaw_calibration_duration_s - cal_clock.getTime())
+        def _run_jaw_calibration() -> None:
+            nonlocal jaw_classifier
+
+            n_per_class = 5
+            hold_s = 1.2
+            prep_s = 2.5
+            iti_s = 1.5
+            jaw_window_n_local = int(round(0.60 * sfreq))
+            min_samples = jaw_window_n_local
+
             _draw_empty_board_screen(
                 "Jaw calibration",
-                f"Clench your jaw five times with gaps in between",
+                "We will collect REST and JAW CLENCH trials. Press SPACE to begin.",
+            )
+            while True:
+                keys = event.getKeys()
+                if "escape" in keys:
+                    raise KeyboardInterrupt
+                if "space" in keys:
+                    break
+                _draw_empty_board_screen(
+                    "Jaw calibration",
+                    "We will collect REST and JAW CLENCH trials. Press SPACE to begin.",
+                )
+
+            labels = [0] * n_per_class + [1] * n_per_class
+            random.shuffle(labels)
+            X_cal: list[np.ndarray] = []
+            y_cal: list[int] = []
+
+            for i, y_label in enumerate(labels, start=1):
+                is_clench = bool(y_label == 1)
+                trial_name = "JAW CLENCH" if is_clench else "REST"
+
+                clk = core.Clock()
+                while clk.getTime() < prep_s:
+                    if "escape" in event.getKeys():
+                        raise KeyboardInterrupt
+                    _draw_empty_board_screen("Prepare", f"Next trial: {trial_name} ({i}/{len(labels)})")
+
+                block_chunks: list[np.ndarray] = []
+                last_ts_local: float | None = None
+                hold_clock = core.Clock()
+                while hold_clock.getTime() < hold_s:
+                    if "escape" in event.getKeys():
+                        raise KeyboardInterrupt
+                    data, ts = stream.get_data(winsize=min(0.20, hold_s), picks="all")
+                    if data.size > 0 and ts is not None and len(ts) > 0:
+                        ts_arr = np.asarray(ts)
+                        mask = np.ones_like(ts_arr, dtype=bool) if last_ts_local is None else (ts_arr > float(last_ts_local))
+                        if np.any(mask):
+                            block_chunks.append(np.asarray(data[:, mask], dtype=np.float32))
+                            last_ts_local = float(ts_arr[mask][-1])
+                    _draw_empty_board_screen(
+                        trial_name,
+                        ("Clench jaw and hold." if is_clench else "Relax face and avoid blinking/movement.")
+                        + f"  ({i}/{len(labels)})",
+                    )
+
+                block = np.concatenate(block_chunks, axis=1) if block_chunks else np.empty((len(model_ch_names), 0), dtype=np.float32)
+                if block.shape[1] >= min_samples:
+                    feat_block = block[:, -min_samples:]
+                    X_cal.append(_extract_jaw_features(feat_block, jaw_idxs))
+                    y_cal.append(int(y_label))
+                else:
+                    logger.warning(
+                        "Skipping short jaw calibration block %d: samples=%d, needed=%d",
+                        i,
+                        int(block.shape[1]),
+                        min_samples,
+                    )
+
+                iti_clock = core.Clock()
+                while iti_clock.getTime() < iti_s:
+                    if "escape" in event.getKeys():
+                        raise KeyboardInterrupt
+                    _draw_empty_board_screen("Relax", "Short break")
+
+            if len(y_cal) < 6 or len(set(y_cal)) < 2:
+                raise RuntimeError(
+                    "Jaw calibration failed: not enough usable rest/clench samples. "
+                    "Please rerun and reduce movement/blinks during REST trials."
+                )
+
+            X_np = np.asarray(X_cal, dtype=np.float32)
+            y_np = np.asarray(y_cal, dtype=int)
+            jaw_classifier = make_pipeline(
+                StandardScaler(),
+                LogisticRegression(
+                    random_state=42,
+                    class_weight="balanced",
+                    solver="liblinear",
+                    max_iter=1000,
+                ),
+            )
+            jaw_classifier.fit(X_np, y_np)
+            train_acc = float(jaw_classifier.score(X_np, y_np))
+            logger.info(
+                "Jaw calibration complete: samples=%d, rest=%d, clench=%d, train_acc=%.3f, jaw_channels=%s",
+                int(len(y_np)),
+                int(np.sum(y_np == 0)),
+                int(np.sum(y_np == 1)),
+                train_acc,
+                [model_ch_names[idx] for idx in jaw_idxs],
             )
 
-        if calib_raw:
-            try:
-                jaw_signal = np.concatenate(calib_raw).astype(np.float32)
-                floor = jaw_detector.calibrate(jaw_signal)
-                logger.info("Jaw detector calibrated: floor=%.3f", float(floor))
-            except Exception:
-                logger.warning("Jaw detector calibration failed, continuing with adaptive baseline.")
+            _draw_empty_board_screen(
+                "Jaw classifier ready",
+                f"Train acc {train_acc:.2f}. Jaw clench rotates. Press SPACE to start.",
+            )
+            while True:
+                keys = event.getKeys()
+                if "escape" in keys:
+                    raise KeyboardInterrupt
+                if "space" in keys:
+                    return
+                _draw_empty_board_screen(
+                    "Jaw classifier ready",
+                    f"Train acc {train_acc:.2f}. Jaw clench rotates. Press SPACE to start.",
+                )
+
+        _run_jaw_calibration()
 
     except Exception:
         try:
@@ -688,8 +813,8 @@ def run_task(fname: str) -> None:  # noqa: C901
     stream_pull_s = max(0.10, task_cfg.live_update_interval_s * 2.0)
     reject_thresh = eeg_cfg.reject_peak_to_peak
     last_live_ts: float | None = None
-    jaw_buffer_raw = np.empty(0, dtype=np.float32)
-    jaw_buffer_ts = np.empty(0, dtype=np.float64)
+    jaw_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
+    jaw_window_n = int(round(0.60 * sfreq))
 
     pred_clock = core.Clock()
     prediction_count = 0
@@ -703,7 +828,8 @@ def run_task(fname: str) -> None:  # noqa: C901
     bias_offset = float(task_cfg.live_bias_offset) if bool(task_cfg.enable_live_bias_offset) else 0.0
 
     def _pull_stream_and_update_buffers() -> None:
-        nonlocal last_live_ts, live_buffer, jaw_buffer_raw, jaw_buffer_ts
+        nonlocal last_live_ts, live_buffer, jaw_buffer
+        nonlocal jaw_prob, jaw_prev_pred, jaw_last_trigger_t, jaw_event_pending
 
         data, ts = stream.get_data(winsize=stream_pull_s, picks="all")
         if data.size == 0 or ts is None or len(ts) == 0:
@@ -723,14 +849,21 @@ def run_task(fname: str) -> None:  # noqa: C901
         if live_buffer.shape[1] > keep_n:
             live_buffer = live_buffer[:, -keep_n:]
 
-        jaw_raw_new = np.asarray(x_new[jaw_ch_idx], dtype=np.float32)
-        jaw_buffer_raw = np.concatenate((jaw_buffer_raw, jaw_raw_new))
-        jaw_buffer_ts = np.concatenate((jaw_buffer_ts, t_new))
+        jaw_buffer = np.concatenate((jaw_buffer, x_new), axis=1)
+        max_keep = max(keep_n, jaw_window_n)
+        if jaw_buffer.shape[1] > max_keep:
+            jaw_buffer = jaw_buffer[:, -max_keep:]
 
-        keep = int(max(sfreq, window_n))
-        if jaw_buffer_raw.size > keep:
-            jaw_buffer_raw = jaw_buffer_raw[-keep:]
-            jaw_buffer_ts = jaw_buffer_ts[-keep:]
+        if jaw_classifier is not None and jaw_buffer.shape[1] >= jaw_window_n:
+            jaw_win = jaw_buffer[:, -jaw_window_n:]
+            feat = _extract_jaw_features(jaw_win, jaw_idxs).reshape(1, -1)
+            jaw_prob = float(jaw_classifier.predict_proba(feat)[0, 1])
+            jaw_pred = int(jaw_prob >= jaw_prob_thresh)
+            now_t = core.getTime()
+            if jaw_pred == 1 and jaw_prev_pred == 0 and (now_t - jaw_last_trigger_t) >= jaw_refractory_s:
+                jaw_last_trigger_t = now_t
+                jaw_event_pending = True
+            jaw_prev_pred = jaw_pred
 
     def _poll_decoder() -> None:
         nonlocal prediction_count
@@ -770,10 +903,11 @@ def run_task(fname: str) -> None:  # noqa: C901
         live_note = "tracking"
 
     def _poll_jaw_clench() -> bool:
-        if jaw_buffer_raw.size < 8 or jaw_buffer_ts.size < 8:
-            return False
-        _, clenches, _ = jaw_detector.detect(jaw_buffer_raw, jaw_buffer_ts, jaw_thresh_min)
-        return len(clenches) > 0
+        nonlocal jaw_event_pending
+        if jaw_event_pending:
+            jaw_event_pending = False
+            return True
+        return False
 
     MOVE_COOLDOWN_S = 0.40
     last_move_t = -999.0
@@ -824,9 +958,11 @@ def run_task(fname: str) -> None:  # noqa: C901
 
             live_filter.reset()
             live_buffer = np.empty((len(model_ch_names), 0), np.float32)
-            jaw_buffer_raw = np.empty(0, dtype=np.float32)
-            jaw_buffer_ts = np.empty(0, dtype=np.float64)
-            jaw_detector.reset_runtime_state()
+            jaw_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
+            jaw_prob = 0.0
+            jaw_prev_pred = 0
+            jaw_event_pending = False
+            jaw_last_trigger_t = -1e9
             last_live_ts = None
             pred_clock.reset()
             prediction_count = 0
@@ -869,7 +1005,7 @@ def run_task(fname: str) -> None:  # noqa: C901
                     parts.extend([f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", live_note])
                     txt_bci.text = "   ".join(parts)
                     txt_cue.text = "LEFT/RIGHT imagery → move  |  Jaw clench → rotate"
-                    txt_status.text = f"Predictions: {prediction_count}"
+                    txt_status.text = f"Predictions: {prediction_count}   jaw_p={jaw_prob:.2f}"
 
                     _draw_frame(board)
 
