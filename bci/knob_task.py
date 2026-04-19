@@ -616,7 +616,7 @@ def run_task(fname: str) -> None:
 
                 turn_rate_rad_s = task_cfg.max_turn_rate_deg_s
                 heading_rad = _wrap_angle(
-                    heading_rad + math.radians(turn_rate_rad_s) * steering_state * dt
+                    heading_rad - math.radians(turn_rate_rad_s) * steering_state * dt
                 )
 
                 # heading_line.ori = math.degrees(heading_rad)

@@ -266,6 +266,7 @@ def run_task(fname: str):
             stim_cfg=stim_cfg,
             target_sfreq=sfreq,
             target_channel_names=model_ch_names,
+            calibrateOnParticipant=""
         )
 
         if bool(task_cfg.enable_online_rest_calibration):

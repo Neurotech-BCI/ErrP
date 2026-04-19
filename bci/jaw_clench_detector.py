@@ -78,12 +78,12 @@ class JawClenchDetector:
     def reset_runtime_state(self) -> None:
         self.last_clench_ts = None
         self.recent_clenches.clear()
-
+    """
     def calibrate(self, signal: np.ndarray) -> float:
-        """
+        
         calibrate a personalized jaw-clench threshold from a recording where the
         user intentionally clenches about 5 times with short rests in between.
-        """
+        
         x = np.asarray(signal, dtype=float)
         if x.size < 8:
             return self.calibrated_floor
@@ -136,8 +136,8 @@ class JawClenchDetector:
 
         return self.calibrated_floor
         """
+
     def calibrate(self, signal: np.ndarray) -> float:
-        Prime baseline statistics from a short relaxed jaw segment.
         x = np.asarray(signal, dtype=float)
         if x.size < 8:
             return self.calibrated_floor
@@ -157,7 +157,7 @@ class JawClenchDetector:
         floor = max(base_med + 4.0 * base_scale, float(np.percentile(env, 70)) * 0.45)
         self.calibrated_floor = max(self.calibrated_floor, float(floor))
         return self.calibrated_floor
-"""
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

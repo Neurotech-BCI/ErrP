@@ -572,7 +572,7 @@ def run_task(fname: str) -> None:  # noqa: C901
 
                     # Obstacle spawn/update.
                     speed_mult = 1.0 + 0.35 * min(1.5, elapsed / 60.0)
-                    world_speed = 0.95 * speed_mult
+                    world_speed = 0.50 * speed_mult
 
                     spawn_interval = max(0.34, 0.92 - 0.30 * min(1.0, elapsed / 75.0))
                     spawn_timer -= dt

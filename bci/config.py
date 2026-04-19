@@ -35,6 +35,7 @@ class StimConfig:
 @dataclass(frozen=True)
 class EEGConfig:
     picks: tuple[str, ...] = ("Pz", "F4", "C4", "P4", "P3", "C3", "F3")
+    #picks: tuple[str, ...] = ("Pz", "F4", "C4", "P4", "C3", "F3")
     #picks: tuple[str, ...] = ("C4", "C3")
 
     # Optional reference channel to apply consistently to offline EDFs and
@@ -271,7 +272,7 @@ class MICursorTaskConfig:
     forward_speed_norm_s: float = 0.24
     # Increase `max_turn_rate_deg_s` for tighter turns and more agility.
     # Decrease it for gentler, more stable arcs.
-    max_turn_rate_deg_s: float = 115.0
+    max_turn_rate_deg_s: float = 95.0
     # Increase `command_ema_alpha` for faster but noisier command updates.
     # Decrease it for smoother but laggier control.
     command_ema_alpha: float = 0.28
@@ -280,7 +281,7 @@ class MICursorTaskConfig:
     command_deadband: float = 0.10
     # Increase `steering_time_constant_s` for slower, smoother steering changes.
     # Decrease it for quicker but potentially more abrupt steering.
-    steering_time_constant_s: float = 0.35
+    steering_time_constant_s: float = 0.50
 
     calirate_on_participant: str = "mi"
 
@@ -400,7 +401,7 @@ class KnobTaskConfig:
     knob_radius: float = 0.5
     rotation_speed: float = 0.1 # this is just a multiplier
     min_angular_distance: float = 0.5 # in radians. 0.5 rad is around 28.6 degrees. distances between target region centers in adjacent trials.
-    target_region_radius: float = 0.05 # also in radians. target region will be 2*target_region_radius in size
+    target_region_radius: float = 0.01 # also in radians. target region will be 2*target_region_radius in size
     start_angle: float = 0 # ie start facing up / 12 o'clock
 
     # Increase `max_turn_rate_deg_s` for tighter turns and more agility.
