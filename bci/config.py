@@ -283,6 +283,22 @@ class MICursorTaskConfig:
     # Decrease it for quicker but potentially more abrupt steering.
     steering_time_constant_s: float = 0.50
 
+    # Optional jaw-clench pause/resume control for the steering task.
+    # When enabled, the task starts paused and jaw clench toggles movement.
+    enable_jaw_clench_pause: bool = False
+    # Jaw clench probability threshold for pause/resume toggling.
+    jaw_clench_prob_thresh: float = 0.70
+    # Minimum time between accepted jaw-clench toggles.
+    jaw_clench_refractory_s: float = 0.70
+    # Calibration trial count per jaw class (REST and CLENCH).
+    jaw_calibration_trials_per_class: int = 5
+    # Preparation time before each jaw calibration trial.
+    jaw_calibration_prep_s: float = 2.5
+    # Hold duration for each jaw calibration trial.
+    jaw_calibration_hold_s: float = 1.2
+    # Rest interval between jaw calibration trials.
+    jaw_calibration_iti_s: float = 1.5
+
     calirate_on_participant: str = "mi"
 
 @dataclass(frozen=True)
