@@ -56,6 +56,74 @@ def extract_jaw_features(block: np.ndarray, jaw_idxs: list[int]) -> np.ndarray:
     return np.asarray(features, dtype=np.float32)
 
 
+def split_overlapping_windows(
+    block: np.ndarray,
+    sfreq: float,
+    window_s: float,
+    step_s: float,
+) -> np.ndarray:
+    """Split a continuous block into overlapping windows."""
+    X = np.asarray(block, dtype=np.float32)
+    if X.ndim != 2:
+        raise ValueError(f"Expected shape (n_channels, n_samples), got {X.shape}")
+
+    window_n = int(round(float(window_s) * float(sfreq)))
+    step_n = int(round(float(step_s) * float(sfreq)))
+    if window_n <= 0 or step_n <= 0:
+        raise ValueError("window_s and step_s must produce at least one sample")
+    if X.shape[1] < window_n:
+        return np.empty((0, X.shape[0], window_n), dtype=np.float32)
+
+    starts = np.arange(0, X.shape[1] - window_n + 1, step_n, dtype=int)
+    windows = np.empty((len(starts), X.shape[0], window_n), dtype=np.float32)
+    for i, start in enumerate(starts):
+        windows[i] = X[:, start:start + window_n]
+    return windows
+
+
+def prepare_jaw_calibration_features(
+    blocks: list[np.ndarray],
+    labels: list[int],
+    jaw_idxs: list[int],
+    sfreq: float,
+    window_s: float,
+    step_s: float,
+    edge_trim_s: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert long calibration blocks into windowed jaw feature rows."""
+    if len(blocks) != len(labels):
+        raise ValueError("blocks and labels must have the same length")
+
+    X_rows: list[np.ndarray] = []
+    y_rows: list[int] = []
+    trim_n = max(0, int(round(float(edge_trim_s) * float(sfreq))))
+
+    for block, label in zip(blocks, labels):
+        X_block = np.asarray(block, dtype=np.float32)
+        if X_block.ndim != 2 or X_block.shape[1] == 0:
+            continue
+
+        start = trim_n
+        stop = X_block.shape[1] - trim_n
+        if stop <= start:
+            continue
+
+        trimmed = X_block[:, start:stop]
+        windows = split_overlapping_windows(
+            block=trimmed,
+            sfreq=float(sfreq),
+            window_s=float(window_s),
+            step_s=float(step_s),
+        )
+        for win in windows:
+            X_rows.append(extract_jaw_features(win, jaw_idxs))
+            y_rows.append(int(label))
+
+    if not X_rows:
+        return np.empty((0, 12), dtype=np.float32), np.empty((0,), dtype=int)
+    return np.asarray(X_rows, dtype=np.float32), np.asarray(y_rows, dtype=int)
+
+
 def build_jaw_clench_classifier(
     *,
     random_state: int = 42,
@@ -158,13 +226,17 @@ def run_visual_face_event_calibration(
     collect_stream_block: Callable[[float], np.ndarray],
     jaw_idxs: list[int],
     jaw_window_n: int,
+    sfreq: float,
     model_ch_names: list[str],
     logger: logging.Logger,
     n_per_class: int = 5,
-    hold_s: float = 1.2,
+    hold_s: float = 5.0,
     prep_s: float = 2.5,
     iti_s: float = 1.5,
-    min_total_samples: int = 9,
+    window_s: float = 0.60,
+    step_s: float = 0.10,
+    edge_trim_s: float = 0.5,
+    min_total_samples: int = 18,
 ) -> tuple[Pipeline, float, np.ndarray, dict[int, int]]:
     """Run PsychoPy visual calibration for REST/JAW CLENCH/RAPID BLINK."""
     original_layout = {
@@ -182,7 +254,8 @@ def run_visual_face_event_calibration(
     info.height = 0.052
     status.height = 0.048
 
-    min_samples = int(jaw_window_n)
+    trim_n = max(0, int(round(float(edge_trim_s) * float(sfreq))))
+    min_samples = int(jaw_window_n) + 2 * trim_n
     class_map = {
         REST_CLASS_CODE: ("REST", "Relax face and avoid blinking/movement."),
         JAW_CLENCH_CLASS_CODE: ("JAW CLENCH", "Clench jaw and hold."),
@@ -202,8 +275,8 @@ def run_visual_face_event_calibration(
         )
         np.random.default_rng().shuffle(labels)
 
-        X_cal: list[np.ndarray] = []
-        y_cal: list[int] = []
+        calib_blocks: list[np.ndarray] = []
+        calib_labels: list[int] = []
 
         for i, y_label in enumerate(labels, start=1):
             trial_name, instruction = class_map[int(y_label)]
@@ -219,9 +292,8 @@ def run_visual_face_event_calibration(
             block = collect_stream_block(float(hold_s))
 
             if block.shape[1] >= min_samples:
-                feat_block = block[:, -min_samples:]
-                X_cal.append(extract_jaw_features(feat_block, jaw_idxs))
-                y_cal.append(int(y_label))
+                calib_blocks.append(block)
+                calib_labels.append(int(y_label))
             else:
                 logger.warning(
                     "Skipping short calibration block %d: samples=%d, needed=%d",
@@ -235,19 +307,32 @@ def run_visual_face_event_calibration(
             status.text = ""
             wait_for_seconds(float(iti_s))
 
+        X_cal, y_cal = prepare_jaw_calibration_features(
+            blocks=calib_blocks,
+            labels=calib_labels,
+            jaw_idxs=jaw_idxs,
+            sfreq=float(sfreq),
+            window_s=float(window_s),
+            step_s=float(step_s),
+            edge_trim_s=float(edge_trim_s),
+        )
+
         face_classifier, train_acc, _X_np, y_np, class_counts = train_face_event_classifier(
             feature_rows=X_cal,
             labels=y_cal,
             min_total_samples=int(min_total_samples),
         )
         logger.info(
-            "Face-event calibration complete: samples=%d, rest=%d, jaw=%d, blink=%d, train_acc=%.3f, channels=%s",
+            "Face-event calibration complete: windows=%d, rest=%d, jaw=%d, blink=%d, train_acc=%.3f, channels=%s, window_s=%.2f, step_s=%.2f, trim_s=%.2f",
             int(len(y_np)),
             int(class_counts.get(REST_CLASS_CODE, 0)),
             int(class_counts.get(JAW_CLENCH_CLASS_CODE, 0)),
             int(class_counts.get(RAPID_BLINK_CLASS_CODE, 0)),
             train_acc,
             [model_ch_names[idx] for idx in jaw_idxs],
+            float(window_s),
+            float(step_s),
+            float(edge_trim_s),
         )
 
         cue.text = "Calibration complete"
@@ -274,13 +359,17 @@ def run_visual_jaw_calibration(
     collect_stream_block: Callable[[float], np.ndarray],
     jaw_idxs: list[int],
     jaw_window_n: int,
+    sfreq: float,
     model_ch_names: list[str],
     logger: logging.Logger,
     n_per_class: int = 5,
-    hold_s: float = 1.2,
+    hold_s: float = 5.0,
     prep_s: float = 2.5,
     iti_s: float = 1.5,
-    min_total_samples: int = 6,
+    window_s: float = 0.60,
+    step_s: float = 0.10,
+    edge_trim_s: float = 0.5,
+    min_total_samples: int = 12,
 ) -> tuple[Pipeline, float, np.ndarray]:
     """Run the PsychoPy jaw calibration flow and train the classifier.
 
@@ -302,7 +391,8 @@ def run_visual_jaw_calibration(
     info.height = 0.052
     status.height = 0.048
 
-    min_samples = int(jaw_window_n)
+    trim_n = max(0, int(round(float(edge_trim_s) * float(sfreq))))
+    min_samples = int(jaw_window_n) + 2 * trim_n
 
     cue.text = "Jaw calibration"
     info.text = "We will collect REST and JAW CLENCH trials to train a pause classifier."
@@ -312,8 +402,8 @@ def run_visual_jaw_calibration(
     try:
         labels = [0] * int(n_per_class) + [1] * int(n_per_class)
         np.random.default_rng().shuffle(labels)
-        X_cal: list[np.ndarray] = []
-        y_cal: list[int] = []
+        calib_blocks: list[np.ndarray] = []
+        calib_labels: list[int] = []
 
         for i, y_label in enumerate(labels, start=1):
             is_clench = bool(y_label == 1)
@@ -332,9 +422,8 @@ def run_visual_jaw_calibration(
             block = collect_stream_block(float(hold_s))
 
             if block.shape[1] >= min_samples:
-                feat_block = block[:, -min_samples:]
-                X_cal.append(extract_jaw_features(feat_block, jaw_idxs))
-                y_cal.append(int(y_label))
+                calib_blocks.append(block)
+                calib_labels.append(int(y_label))
             else:
                 logger.warning(
                     "Skipping short calibration block %d: samples=%d, needed=%d",
@@ -348,18 +437,31 @@ def run_visual_jaw_calibration(
             status.text = ""
             wait_for_seconds(float(iti_s))
 
+        X_cal, y_cal = prepare_jaw_calibration_features(
+            blocks=calib_blocks,
+            labels=calib_labels,
+            jaw_idxs=jaw_idxs,
+            sfreq=float(sfreq),
+            window_s=float(window_s),
+            step_s=float(step_s),
+            edge_trim_s=float(edge_trim_s),
+        )
+
         jaw_classifier, train_acc, _X_np, y_np = train_jaw_clench_classifier(
             feature_rows=X_cal,
             labels=y_cal,
             min_total_samples=int(min_total_samples),
         )
         logger.info(
-            "Jaw calibration complete: samples=%d, rest=%d, clench=%d, train_acc=%.3f, jaw_channels=%s",
+            "Jaw calibration complete: windows=%d, rest=%d, clench=%d, train_acc=%.3f, jaw_channels=%s, window_s=%.2f, step_s=%.2f, trim_s=%.2f",
             int(len(y_np)),
             int(np.sum(y_np == 0)),
             int(np.sum(y_np == 1)),
             train_acc,
             [model_ch_names[idx] for idx in jaw_idxs],
+            float(window_s),
+            float(step_s),
+            float(edge_trim_s),
         )
 
         cue.text = "Calibration complete"

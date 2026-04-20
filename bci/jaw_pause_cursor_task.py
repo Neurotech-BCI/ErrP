@@ -412,12 +412,16 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
             collect_stream_block=_collect_stream_block,
             jaw_idxs=jaw_idxs,
             jaw_window_n=jaw_window_n,
+            sfreq=sfreq,
             model_ch_names=model_ch_names,
             logger=logger,
             n_per_class=5,
             hold_s=1.2,
             prep_s=2.5,
             iti_s=1.5,
+            window_s=float(task_cfg.jaw_window_s),
+            step_s=float(task_cfg.jaw_window_step_s),
+            edge_trim_s=float(task_cfg.jaw_calibration_trim_s),
             min_total_samples=6,
         )
 

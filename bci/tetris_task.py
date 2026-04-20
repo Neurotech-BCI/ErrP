@@ -10,9 +10,6 @@ from typing import Optional
 import numpy as np
 from psychopy import core, event, visual
 from mne_lsl.stream import StreamLSL
-from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
 
 
 from config import (
@@ -23,10 +20,16 @@ from config import (
     MICursorTaskConfig,
     StimConfig,
 )
-from jaw_utils import extract_jaw_features, prepare_jaw_calibration_features, select_jaw_channel_indices
+from derick_ml_jawclench import (
+    prepare_jaw_calibration_features,
+    select_jaw_channel_indices,
+    train_jaw_clench_classifier,
+    update_live_jaw_clench_state,
+)
 from mental_command_worker import (
     StreamingIIRFilter,
     append_windows_to_dataset,
+    canonicalize_channel_name,
     evaluate_loso_sessions,
     load_offline_mi_dataset,
     make_mi_classifier,
@@ -283,7 +286,7 @@ def run_task(fname: str) -> None:  # noqa: C901
     stream_ch_names = list(stream.info["ch_names"])
     logger.info("Channels: sfreq=%.1f  selected=%s  missing=%s", sfreq, stream_ch_names, missing)
 
-    jaw_idxs = _select_jaw_channel_indices(model_ch_names)
+    jaw_idxs = select_jaw_channel_indices(model_ch_names)
     jaw_classifier = None
     jaw_prob = 0.0
     jaw_prev_pred = 0
@@ -728,17 +731,11 @@ def run_task(fname: str) -> None:  # noqa: C901
                     "Please rerun and reduce movement/blinks during REST trials."
                 )
 
-            jaw_classifier = make_pipeline(
-                StandardScaler(),
-                LogisticRegression(
-                    random_state=42,
-                    class_weight="balanced",
-                    solver="liblinear",
-                    max_iter=1000,
-                ),
+            jaw_classifier, train_acc, _X_np, y_np = train_jaw_clench_classifier(
+                feature_rows=X_np,
+                labels=y_np,
+                min_total_samples=12,
             )
-            jaw_classifier.fit(X_np, y_np)
-            train_acc = float(jaw_classifier.score(X_np, y_np))
             logger.info(
                 "Jaw calibration complete: windows=%d, rest=%d, clench=%d, train_acc=%.3f, jaw_channels=%s, window_s=%.2f, step_s=%.2f, trim_s=%.2f",
                 int(len(y_np)),
@@ -829,21 +826,23 @@ def run_task(fname: str) -> None:  # noqa: C901
         if live_buffer.shape[1] > keep_n:
             live_buffer = live_buffer[:, -keep_n:]
 
-        jaw_buffer = np.concatenate((jaw_buffer, x_new), axis=1)
-        max_keep = max(keep_n, jaw_window_n)
-        if jaw_buffer.shape[1] > max_keep:
-            jaw_buffer = jaw_buffer[:, -max_keep:]
-
-        if jaw_classifier is not None and jaw_buffer.shape[1] >= jaw_window_n:
-            jaw_win = jaw_buffer[:, -jaw_window_n:]
-            feat = _extract_jaw_features(jaw_win, jaw_idxs).reshape(1, -1)
-            jaw_prob = float(jaw_classifier.predict_proba(feat)[0, 1])
-            jaw_pred = int(jaw_prob >= jaw_prob_thresh)
-            now_t = core.getTime()
-            if jaw_pred == 1 and jaw_prev_pred == 0 and (now_t - jaw_last_trigger_t) >= jaw_refractory_s:
-                jaw_last_trigger_t = now_t
-                jaw_event_pending = True
-            jaw_prev_pred = jaw_pred
+        jaw_buffer, jaw_prob, jaw_prev_pred, should_toggle = update_live_jaw_clench_state(
+            jaw_buffer=jaw_buffer,
+            x_new=x_new,
+            keep_n=keep_n,
+            jaw_window_n=jaw_window_n,
+            jaw_classifier=jaw_classifier,
+            jaw_idxs=jaw_idxs,
+            jaw_prob=jaw_prob,
+            jaw_prev_pred=jaw_prev_pred,
+            jaw_prob_thresh=jaw_prob_thresh,
+            jaw_last_toggle_t=jaw_last_trigger_t,
+            jaw_refractory_s=jaw_refractory_s,
+            now_t=core.getTime(),
+        )
+        if should_toggle:
+            jaw_last_trigger_t = core.getTime()
+            jaw_event_pending = True
 
     def _poll_decoder() -> None:
         nonlocal prediction_count
