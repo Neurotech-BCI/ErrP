@@ -99,7 +99,20 @@ def _sample_target( # altered to generate a target region for the knob instead
             return [candidate - radius, candidate + radius]
     raise RuntimeError("Failed to sample a valid target location.")
 
-def create_target_region(start_angle_rad: float, end_angle_rad: float, radius: float, num_points: int = 50):
+def create_region_of_death(target_pos: np.ndarray, radius: float):
+    target_start = target_pos[0]
+    target_end = target_pos[1]
+    target_center = (target_start + target_end)/2.0 # all three in radians
+    rod_center = 0
+
+    if np.abs(np.abs(target_center) - math.pi) <= radius: # if the target is pi radians away
+        rod_center = np.random.choice([-math.pi/2, math.pi/2])
+        return [rod_center - radius, rod_center + radius]
+
+    rod_center = _wrap_angle(target_center + np.pi)
+    return [rod_center - radius, rod_center + radius]
+
+def create_target_region(start_angle_rad: float, end_angle_rad: float, radius: float, num_points: int = 25):
     vertices = [(0, 0)] # Start at center
     step = (end_angle_rad - start_angle_rad) / (num_points - 1)
     
@@ -164,6 +177,7 @@ def run_task(fname: str) -> None:
     white = (0.90, 0.90, 0.90)
     accent = (0.88, 0.92, 0.96)
     success_color = (0.38, 0.92, 0.56)
+    failure_color = (1, -1, -1)
 
     # draw knob
     knob = visual.Circle(
@@ -204,12 +218,26 @@ def run_task(fname: str) -> None:
             prev_target=0.0
         )
 
-    target_region_vertices = create_target_region(target_pos[0], target_pos[1], task_cfg.knob_radius, num_points=100) # change this 100 if necessary
+    rod_pos = create_region_of_death(
+            target_pos=target_pos,
+            radius=float(task_cfg.knob_radius)
+        )
+
+    target_region_vertices = create_target_region(target_pos[0], target_pos[1], task_cfg.knob_radius) # change this 100 if necessary
+    rod_vertices = create_target_region(rod_pos[0], rod_pos[1], task_cfg.knob_radius)
 
     target_region = visual.ShapeStim(
         win, 
         vertices=target_region_vertices, 
         fillColor=[0, 0.5, 0],   # Dark green
+        lineColor=None,
+        opacity=0.6
+    )
+    
+    region_of_death = visual.ShapeStim(
+        win, 
+        vertices=rod_vertices, 
+        fillColor=[1, -1, -1],   # RED
         lineColor=None,
         opacity=0.6
     )
@@ -229,6 +257,7 @@ def run_task(fname: str) -> None:
         arena_outline.draw()
         knob.draw()
         target_region.draw()
+        region_of_death.draw()
         heading_line.draw()
         title.draw()
         cue.draw()
@@ -421,9 +450,17 @@ def run_task(fname: str) -> None:
             prev_target=np.mean(target_pos)
         )
 
-        target_region_vertices = create_target_region(target_pos[0], target_pos[1], task_cfg.knob_radius, num_points=100) # change this 100 if necessary
+        rod_pos = create_region_of_death(
+            target_pos=target_pos,
+            radius=float(task_cfg.knob_radius)
+        )
+
+        target_region_vertices = create_target_region(target_pos[0], target_pos[1], task_cfg.knob_radius) # change this 100 if necessary
+        rod_vertices = create_target_region(rod_pos[0], rod_pos[1], radius=task_cfg.knob_radius)
 
         target_region.vertices = target_region_vertices
+        region_of_death.vertices = rod_vertices
+
         _draw_frame()
     except Exception:
         try:
@@ -573,7 +610,11 @@ def run_task(fname: str) -> None:
                 radius=task_cfg.knob_radius,
                 prev_target=float((target_pos[0] + target_pos[1])/2.0)
             )
-            target_region.vertices = create_target_region(target_pos[0], target_pos[1], task_cfg.knob_radius, num_points=100)
+            rod_pos = create_region_of_death(
+                target_pos=target_pos, radius=task_cfg.knob_radius
+            )
+            target_region.vertices = create_target_region(target_pos[0], target_pos[1], task_cfg.knob_radius)
+            region_of_death.vertices = create_region_of_death(rod_vertices[0], rod_vertices[1], radius=task_cfg.knob_radius)
             status.text = (
                 f"Trials completed: {completed_trials}\n"
                 "Press SPACE to start the next target. ESC to stop."
@@ -630,6 +671,10 @@ def run_task(fname: str) -> None:
                 target_center = (target_pos[0] + target_pos[1]) / 2.0
                 angular_dist_to_center = abs((heading_rad - target_center + math.pi) % (2 * math.pi) - math.pi)
                 target_region_reached = angular_dist_to_center <= task_cfg.knob_radius
+                
+                rod_center = (rod_pos[0] + rod_pos[1]) / 2.0
+                angular_dist_to_rod = abs((heading_rad - rod_center + math.pi) % (2 * math.pi) - math.pi)
+                rod_reached = angular_dist_to_rod <= task_cfg.knob_radius
 
                 cue.text = f"Trial {completed_trials + 1}"
                 parts = [
@@ -675,6 +720,36 @@ def run_task(fname: str) -> None:
                             raise KeyboardInterrupt
                         _poll_live_decoder()
                         cue.text = "Target reached"
+                        info.text = (
+                            f"time={trial_duration:.1f}s   path={path_length:.2f}   "
+                            f"updates={prediction_count - trial_pred_start}"
+                        )
+                        status.text = "Press SPACE for the next target after the pause."
+                        _draw_frame()
+                    break
+                elif rod_reached:
+                    completed_trials += 1
+                    target_region.fillColor = failure_color
+                    trial_duration = float(trial_clock.getTime())
+                    result = {
+                        "trial": int(completed_trials),
+                        "target_x": float(target_pos[0]),
+                        "target_y": float(target_pos[1]),
+                        "duration_s": trial_duration,
+                        "path_length": float(path_length),
+                        "mean_abs_command": float(mean_abs_command_sum / max(command_samples, 1)),
+                        "mean_raw_command": float(mean_raw_command_sum / max(command_samples, 1)),
+                        "prediction_updates": int(prediction_count - trial_pred_start),
+                    }
+                    trial_results.append(result) # update this to reflect faild trial
+                    logger.info("Trial complete: %s", result)
+
+                    hit_clock = core.Clock()
+                    while hit_clock.getTime() < task_cfg.post_hit_pause_s:
+                        if "escape" in event.getKeys():
+                            raise KeyboardInterrupt
+                        _poll_live_decoder()
+                        cue.text = "You Have Failed, Andy"
                         info.text = (
                             f"time={trial_duration:.1f}s   path={path_length:.2f}   "
                             f"updates={prediction_count - trial_pred_start}"
