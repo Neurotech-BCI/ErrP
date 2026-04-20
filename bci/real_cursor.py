@@ -33,12 +33,6 @@ from mental_command_worker import (
 	resolve_channel_order,
 	train_or_load_shared_mi_model,
 )
-
-
-class _Point(ctypes.Structure):
-	_fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
-
-
 def _make_task_logger(fname: str) -> logging.Logger:
 	logger = logging.getLogger(f"real_cursor.{fname}")
 	logger.setLevel(logging.INFO)
@@ -91,7 +85,7 @@ def _apply_deadband(value: float, deadband: float) -> float:
 
 
 def _get_windows_cursor_pos() -> tuple[int, int]:
-	pt = _Point()
+	pt = wintypes.POINT()
 	if not ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
 		raise RuntimeError("GetCursorPos failed")
 	return int(pt.x), int(pt.y)
