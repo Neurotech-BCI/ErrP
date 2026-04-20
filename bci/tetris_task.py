@@ -23,10 +23,10 @@ from config import (
     MICursorTaskConfig,
     StimConfig,
 )
+from jaw_utils import extract_jaw_features, prepare_jaw_calibration_features, select_jaw_channel_indices
 from mental_command_worker import (
     StreamingIIRFilter,
     append_windows_to_dataset,
-    canonicalize_channel_name,
     evaluate_loso_sessions,
     load_offline_mi_dataset,
     make_mi_classifier,
@@ -135,37 +135,6 @@ def _prompt_prefix() -> str:
         if p:
             return f"{datetime.now().strftime('%m_%d_%y')}_{p}_tetris"
         print("Name cannot be empty.")
-
-
-def _select_jaw_channel_indices(ch_names: list[str]) -> list[int]:
-    priority = {"FP1", "FP2", "AF3", "AF4", "F7", "F8", "F3", "F4"}
-    idxs = [i for i, name in enumerate(ch_names) if canonicalize_channel_name(name) in priority]
-    if idxs:
-        return idxs
-    return list(range(len(ch_names)))
-
-
-def _extract_jaw_features(block: np.ndarray, jaw_idxs: list[int]) -> np.ndarray:
-    X = np.asarray(block, dtype=np.float32)
-    if X.ndim != 2:
-        raise ValueError(f"Expected shape (n_channels, n_samples), got {X.shape}")
-    if X.shape[1] < 2:
-        return np.zeros(12, dtype=np.float32)
-
-    if jaw_idxs:
-        X = X[jaw_idxs]
-
-    X = X - np.mean(X, axis=1, keepdims=True)
-    ptp = np.ptp(X, axis=1)
-    rms = np.sqrt(np.mean(np.square(X), axis=1))
-    mav = np.mean(np.abs(X), axis=1)
-    line_len = np.mean(np.abs(np.diff(X, axis=1)), axis=1)
-
-    def _summary(v: np.ndarray) -> list[float]:
-        return [float(np.mean(v)), float(np.max(v)), float(np.std(v))]
-
-    features = _summary(ptp) + _summary(rms) + _summary(mav) + _summary(line_len)
-    return np.asarray(features, dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +288,8 @@ def run_task(fname: str) -> None:  # noqa: C901
     jaw_prob = 0.0
     jaw_prev_pred = 0
     jaw_event_pending = False
-    jaw_prob_thresh = 0.70
-    jaw_refractory_s = 0.70
+    jaw_prob_thresh = float(task_cfg.jaw_clench_prob_thresh)
+    jaw_refractory_s = float(task_cfg.jaw_clench_refractory_s)
     jaw_last_trigger_t = -1e9
 
     CELL = 0.085
@@ -668,12 +637,13 @@ def run_task(fname: str) -> None:  # noqa: C901
         def _run_jaw_calibration() -> None:
             nonlocal jaw_classifier
 
-            n_per_class = 5
-            hold_s = 1.2
-            prep_s = 2.5
-            iti_s = 1.5
-            jaw_window_n_local = int(round(0.60 * sfreq))
-            min_samples = jaw_window_n_local
+            n_per_class = int(task_cfg.jaw_calibration_blocks_per_class)
+            hold_s = float(task_cfg.jaw_calibration_hold_s)
+            prep_s = float(task_cfg.jaw_calibration_prep_s)
+            iti_s = float(task_cfg.jaw_calibration_iti_s)
+            trim_s = float(task_cfg.jaw_calibration_trim_s)
+            jaw_window_n_local = int(round(float(task_cfg.jaw_window_s) * sfreq))
+            min_samples = jaw_window_n_local + 2 * int(round(trim_s * sfreq))
 
             _draw_empty_board_screen(
                 "Jaw calibration",
@@ -692,8 +662,8 @@ def run_task(fname: str) -> None:  # noqa: C901
 
             labels = [0] * n_per_class + [1] * n_per_class
             random.shuffle(labels)
-            X_cal: list[np.ndarray] = []
-            y_cal: list[int] = []
+            calib_blocks: list[np.ndarray] = []
+            calib_labels: list[int] = []
 
             for i, y_label in enumerate(labels, start=1):
                 is_clench = bool(y_label == 1)
@@ -726,9 +696,8 @@ def run_task(fname: str) -> None:  # noqa: C901
 
                 block = np.concatenate(block_chunks, axis=1) if block_chunks else np.empty((len(model_ch_names), 0), dtype=np.float32)
                 if block.shape[1] >= min_samples:
-                    feat_block = block[:, -min_samples:]
-                    X_cal.append(_extract_jaw_features(feat_block, jaw_idxs))
-                    y_cal.append(int(y_label))
+                    calib_blocks.append(block)
+                    calib_labels.append(int(y_label))
                 else:
                     logger.warning(
                         "Skipping short jaw calibration block %d: samples=%d, needed=%d",
@@ -743,14 +712,22 @@ def run_task(fname: str) -> None:  # noqa: C901
                         raise KeyboardInterrupt
                     _draw_empty_board_screen("Relax", "Short break")
 
-            if len(y_cal) < 6 or len(set(y_cal)) < 2:
+            X_np, y_np = prepare_jaw_calibration_features(
+                blocks=calib_blocks,
+                labels=calib_labels,
+                jaw_idxs=jaw_idxs,
+                sfreq=float(sfreq),
+                window_s=float(task_cfg.jaw_window_s),
+                step_s=float(task_cfg.jaw_window_step_s),
+                edge_trim_s=trim_s,
+            )
+
+            if len(y_np) < 12 or len(set(y_np)) < 2:
                 raise RuntimeError(
-                    "Jaw calibration failed: not enough usable rest/clench samples. "
+                    "Jaw calibration failed: not enough usable rest/clench windows. "
                     "Please rerun and reduce movement/blinks during REST trials."
                 )
 
-            X_np = np.asarray(X_cal, dtype=np.float32)
-            y_np = np.asarray(y_cal, dtype=int)
             jaw_classifier = make_pipeline(
                 StandardScaler(),
                 LogisticRegression(
@@ -763,12 +740,15 @@ def run_task(fname: str) -> None:  # noqa: C901
             jaw_classifier.fit(X_np, y_np)
             train_acc = float(jaw_classifier.score(X_np, y_np))
             logger.info(
-                "Jaw calibration complete: samples=%d, rest=%d, clench=%d, train_acc=%.3f, jaw_channels=%s",
+                "Jaw calibration complete: windows=%d, rest=%d, clench=%d, train_acc=%.3f, jaw_channels=%s, window_s=%.2f, step_s=%.2f, trim_s=%.2f",
                 int(len(y_np)),
                 int(np.sum(y_np == 0)),
                 int(np.sum(y_np == 1)),
                 train_acc,
                 [model_ch_names[idx] for idx in jaw_idxs],
+                float(task_cfg.jaw_window_s),
+                float(task_cfg.jaw_window_step_s),
+                trim_s,
             )
 
             _draw_empty_board_screen(
@@ -810,11 +790,11 @@ def run_task(fname: str) -> None:  # noqa: C901
     live_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
     keep_n = int(round((task_cfg.window_s + task_cfg.filter_context_s) * sfreq))
     window_n = int(round(task_cfg.window_s * sfreq))
+    jaw_window_n = int(round(float(task_cfg.jaw_window_s) * sfreq))
     stream_pull_s = max(0.10, task_cfg.live_update_interval_s * 2.0)
     reject_thresh = eeg_cfg.reject_peak_to_peak
     last_live_ts: float | None = None
     jaw_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
-    jaw_window_n = int(round(0.60 * sfreq))
 
     pred_clock = core.Clock()
     prediction_count = 0

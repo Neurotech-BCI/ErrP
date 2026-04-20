@@ -22,6 +22,7 @@ from config import (
     MICursorTaskConfig,
     StimConfig,
 )
+from jaw_utils import extract_jaw_features, prepare_jaw_calibration_features, select_jaw_channel_indices
 from mental_command_worker import (
     StreamingIIRFilter,
     append_windows_to_dataset,
@@ -108,35 +109,15 @@ def _sample_target(
     raise RuntimeError("Failed to sample a valid target location.")
 
 
-def _select_jaw_channel_indices(ch_names: list[str]) -> list[int]:
-    priority = {"FP1", "FP2", "AF3", "AF4", "F7", "F8", "F3", "F4"}
-    idxs = [i for i, name in enumerate(ch_names) if canonicalize_channel_name(name) in priority]
-    if idxs:
-        return idxs
-    return list(range(len(ch_names)))
-
-
-def _extract_jaw_features(block: np.ndarray, jaw_idxs: list[int]) -> np.ndarray:
-    X = np.asarray(block, dtype=np.float32)
-    if X.ndim != 2:
-        raise ValueError(f"Expected shape (n_channels, n_samples), got {X.shape}")
-    if X.shape[1] < 2:
-        return np.zeros(12, dtype=np.float32)
-
-    if jaw_idxs:
-        X = X[jaw_idxs]
-
-    X = X - np.mean(X, axis=1, keepdims=True)
-    ptp = np.ptp(X, axis=1)
-    rms = np.sqrt(np.mean(np.square(X), axis=1))
-    mav = np.mean(np.abs(X), axis=1)
-    line_len = np.mean(np.abs(np.diff(X, axis=1)), axis=1)
-
-    def _summary(v: np.ndarray) -> list[float]:
-        return [float(np.mean(v)), float(np.max(v)), float(np.std(v))]
-
-    features = _summary(ptp) + _summary(rms) + _summary(mav) + _summary(line_len)
-    return np.asarray(features, dtype=np.float32)
+def _wrap_position(pos: np.ndarray, x_limit: float, y_limit: float) -> np.ndarray:
+    wrapped = np.asarray(pos, dtype=np.float64).copy()
+    width = 2.0 * float(x_limit)
+    height = 2.0 * float(y_limit)
+    if width > 0.0:
+        wrapped[0] = ((wrapped[0] + x_limit) % width) - x_limit
+    if height > 0.0:
+        wrapped[1] = ((wrapped[1] + y_limit) % height) - y_limit
+    return wrapped
 
 
 def run_task(fname: str) -> None:
@@ -549,15 +530,16 @@ def run_task(fname: str) -> None:
         if not bool(task_cfg.enable_jaw_clench_pause):
             return
 
-        n_per_class = int(task_cfg.jaw_calibration_trials_per_class)
+        n_per_class = int(task_cfg.jaw_calibration_blocks_per_class)
         hold_s = float(task_cfg.jaw_calibration_hold_s)
         prep_s = float(task_cfg.jaw_calibration_prep_s)
         iti_s = float(task_cfg.jaw_calibration_iti_s)
-        jaw_window_n_local = int(round(0.60 * sfreq))
-        min_samples = jaw_window_n_local
+        trim_s = float(task_cfg.jaw_calibration_trim_s)
+        jaw_window_n_local = int(round(float(task_cfg.jaw_window_s) * sfreq))
+        min_samples = jaw_window_n_local + 2 * int(round(trim_s * sfreq))
 
         cue.text = "Jaw calibration"
-        info.text = "We will collect REST and JAW CLENCH trials to train pause/resume control."
+        info.text = "We will collect long REST and JAW CLENCH blocks to train pause/resume control."
         status.text = "Press SPACE to begin. ESC to quit."
         _draw_frame()
         while True:
@@ -570,8 +552,8 @@ def run_task(fname: str) -> None:
 
         labels = [0] * n_per_class + [1] * n_per_class
         rng.shuffle(labels)
-        X_cal: list[np.ndarray] = []
-        y_cal: list[int] = []
+        calib_blocks: list[np.ndarray] = []
+        calib_labels: list[int] = []
 
         for i, y_label in enumerate(labels, start=1):
             is_clench = bool(y_label == 1)
@@ -590,9 +572,8 @@ def run_task(fname: str) -> None:
             block = _collect_stream_block(hold_s)
 
             if block.shape[1] >= min_samples:
-                feat_block = block[:, -min_samples:]
-                X_cal.append(_extract_jaw_features(feat_block, jaw_idxs))
-                y_cal.append(int(y_label))
+                calib_blocks.append(block)
+                calib_labels.append(int(y_label))
             else:
                 logger.warning(
                     "Skipping short jaw calibration block %d: samples=%d, needed=%d",
@@ -607,14 +588,22 @@ def run_task(fname: str) -> None:
             _draw_frame()
             _wait_for_seconds(iti_s)
 
-        if len(y_cal) < 6 or len(set(y_cal)) < 2:
+        X_np, y_np = prepare_jaw_calibration_features(
+            blocks=calib_blocks,
+            labels=calib_labels,
+            jaw_idxs=jaw_idxs,
+            sfreq=float(sfreq),
+            window_s=float(task_cfg.jaw_window_s),
+            step_s=float(task_cfg.jaw_window_step_s),
+            edge_trim_s=trim_s,
+        )
+
+        if len(y_np) < 12 or len(set(y_np)) < 2:
             raise RuntimeError(
-                "Jaw calibration failed: not enough usable rest/clench samples. "
+                "Jaw calibration failed: not enough usable rest/clench windows. "
                 "Please rerun and reduce movement/blinks during REST trials."
             )
 
-        X_np = np.asarray(X_cal, dtype=np.float32)
-        y_np = np.asarray(y_cal, dtype=int)
         jaw_classifier = make_pipeline(
             StandardScaler(),
             LogisticRegression(
@@ -627,12 +616,15 @@ def run_task(fname: str) -> None:
         jaw_classifier.fit(X_np, y_np)
         train_acc = float(jaw_classifier.score(X_np, y_np))
         logger.info(
-            "Jaw calibration complete: samples=%d, rest=%d, clench=%d, train_acc=%.3f, jaw_channels=%s",
+            "Jaw calibration complete: windows=%d, rest=%d, clench=%d, train_acc=%.3f, jaw_channels=%s, window_s=%.2f, step_s=%.2f, trim_s=%.2f",
             int(len(y_np)),
             int(np.sum(y_np == 0)),
             int(np.sum(y_np == 1)),
             train_acc,
             [model_ch_names[idx] for idx in jaw_idxs],
+            float(task_cfg.jaw_window_s),
+            float(task_cfg.jaw_window_step_s),
+            trim_s,
         )
 
         cue.text = "Jaw classifier ready"
@@ -662,7 +654,7 @@ def run_task(fname: str) -> None:
     reject_thresh = eeg_cfg.reject_peak_to_peak
     last_live_ts: float | None = None
     jaw_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
-    jaw_window_n = int(round(0.60 * sfreq))
+    jaw_window_n = int(round(float(task_cfg.jaw_window_s) * sfreq))
     jaw_prob = 0.0
     jaw_prev_pred = 0
     jaw_event_pending = False
@@ -901,15 +893,13 @@ def run_task(fname: str) -> None:
                         ],
                         dtype=np.float64,
                     )
-                    clamped_pos = np.array(
-                        [
-                            np.clip(proposed_pos[0], -arena_limit_x, arena_limit_x),
-                            np.clip(proposed_pos[1], -arena_limit_y, arena_limit_y),
-                        ],
-                        dtype=np.float64,
+                    wrapped_pos = _wrap_position(
+                        proposed_pos,
+                        x_limit=arena_limit_x,
+                        y_limit=arena_limit_y,
                     )
-                    path_length += float(np.linalg.norm(clamped_pos - cursor_pos))
-                    cursor_pos[:] = clamped_pos
+                    path_length += float(np.linalg.norm(proposed_pos - cursor_pos))
+                    cursor_pos[:] = wrapped_pos
                 _update_cursor_visual()
 
                 mean_abs_command_sum += abs(command_drive)
