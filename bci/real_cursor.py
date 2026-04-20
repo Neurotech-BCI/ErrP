@@ -23,9 +23,12 @@ from config import (
 	StimConfig,
 )
 from derick_ml_jawclench import (
-	run_visual_jaw_calibration,
+	JAW_CLENCH_CLASS_CODE,
+	RAPID_BLINK_CLASS_CODE,
+	REST_CLASS_CODE,
+	run_visual_face_event_calibration,
 	select_jaw_channel_indices,
-	update_live_jaw_clench_state,
+	update_live_face_event_state,
 )
 from mental_command_worker import (
 	StreamingIIRFilter,
@@ -94,6 +97,16 @@ def _get_windows_cursor_pos() -> tuple[int, int]:
 def _set_windows_cursor_pos(x: int, y: int) -> None:
 	if not ctypes.windll.user32.SetCursorPos(int(x), int(y)):
 		raise RuntimeError("SetCursorPos failed")
+
+
+def _left_click_windows(enabled: bool) -> None:
+	if not enabled:
+		return
+	# mouse_event constants: left button down/up.
+	MOUSEEVENTF_LEFTDOWN = 0x0002
+	MOUSEEVENTF_LEFTUP = 0x0004
+	ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+	ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
 
 def _move_windows_cursor_relative(dx: int, dy: int, enabled: bool) -> None:
@@ -222,11 +235,17 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 	last_live_ts: float | None = None
 
 	jaw_idxs = select_jaw_channel_indices(model_ch_names)
+	rest_prob = 0.0
 	jaw_prob = 0.0
+	blink_prob = 0.0
 	jaw_prev_pred = 0
+	blink_prev_pred = 0
 	jaw_prob_thresh = 0.70
+	blink_prob_thresh = 0.70
 	jaw_refractory_s = 0.70
+	blink_refractory_s = 0.70
 	jaw_last_toggle_t = -1e9
+	blink_last_toggle_t = -1e9
 
 	prediction_count = 0
 	left_prob = 0.5
@@ -234,6 +253,7 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 	raw_command = 0.0
 	ema_command = 0.0
 	latest_pred_code: int | None = None
+	face_pred_code = REST_CLASS_CODE
 	live_note = "warming up"
 
 	axis_mode = "lr"
@@ -282,7 +302,7 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 		return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
 
 	try:
-		jaw_classifier, jaw_train_acc, _y_np = run_visual_jaw_calibration(
+		face_classifier, face_train_acc, _y_np, face_counts = run_visual_face_event_calibration(
 			cue=cue,
 			info=info,
 			status=status,
@@ -297,16 +317,29 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 			hold_s=1.2,
 			prep_s=2.5,
 			iti_s=1.5,
-			min_total_samples=6,
+			min_total_samples=9,
 		)
-		with open(f"{fname}_real_cursor_jaw_model.pkl", "wb") as fh:
-			pickle.dump(jaw_classifier, fh)
+		with open(f"{fname}_real_cursor_face_event_model.pkl", "wb") as fh:
+			pickle.dump(face_classifier, fh)
 
-		logger.info("Jaw model ready: train_acc=%.3f", jaw_train_acc)
+		face_classes = np.asarray(face_classifier.named_steps["clf"].classes_, dtype=int)
+		face_class_index = {int(c): i for i, c in enumerate(face_classes)}
+		for needed in (REST_CLASS_CODE, JAW_CLENCH_CLASS_CODE, RAPID_BLINK_CLASS_CODE):
+			if int(needed) not in face_class_index:
+				raise RuntimeError(
+					"Face-event classifier is missing required classes. "
+					f"Found {face_classes.tolist()}, required {[REST_CLASS_CODE, JAW_CLENCH_CLASS_CODE, RAPID_BLINK_CLASS_CODE]}"
+				)
+
+		logger.info(
+			"Face-event model ready: train_acc=%.3f, counts=%s",
+			face_train_acc,
+			face_counts,
+		)
 
 		cue.text = "Live control"
 		info.text = (
-			"Use LEFT/RIGHT MI to move cursor. Jaw clench toggles axis: LR <-> UD. "
+			"Use LEFT/RIGHT MI to move cursor. Rapid eye blinks toggle axis LR<->UD. Jaw clench performs click. "
 			"Press ESC to stop."
 		)
 		status.text = "Press SPACE to start."
@@ -325,24 +358,37 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 					x_new = np.asarray(data[:, mask], dtype=np.float32)
 					last_live_ts = float(ts_arr[mask][-1])
 
-					jaw_buffer, jaw_prob, jaw_prev_pred, should_toggle = update_live_jaw_clench_state(
-						jaw_buffer=jaw_buffer,
+					jaw_buffer, rest_prob, jaw_prob, blink_prob, face_pred_code, jaw_prev_pred, blink_prev_pred, should_click, should_toggle = update_live_face_event_state(
+						face_buffer=jaw_buffer,
 						x_new=x_new,
 						keep_n=keep_n,
 						jaw_window_n=jaw_window_n,
-						jaw_classifier=jaw_classifier,
+						face_classifier=face_classifier,
+						class_index=face_class_index,
 						jaw_idxs=jaw_idxs,
+						rest_prob=rest_prob,
 						jaw_prob=jaw_prob,
+						blink_prob=blink_prob,
 						jaw_prev_pred=jaw_prev_pred,
+						blink_prev_pred=blink_prev_pred,
 						jaw_prob_thresh=jaw_prob_thresh,
-						jaw_last_toggle_t=jaw_last_toggle_t,
+						blink_prob_thresh=blink_prob_thresh,
+						jaw_last_event_t=jaw_last_toggle_t,
+						blink_last_event_t=blink_last_toggle_t,
 						jaw_refractory_s=jaw_refractory_s,
+						blink_refractory_s=blink_refractory_s,
 						now_t=core.getTime(),
 					)
+
+					if should_click:
+						_left_click_windows(enabled=cursor_enabled)
+						jaw_last_toggle_t = core.getTime()
+						logger.info("Jaw clench click (jaw_p=%.2f)", jaw_prob)
+
 					if should_toggle:
 						axis_mode = "ud" if axis_mode == "lr" else "lr"
-						jaw_last_toggle_t = core.getTime()
-						logger.info("Axis toggled to %s (jaw_p=%.2f)", axis_mode, jaw_prob)
+						blink_last_toggle_t = core.getTime()
+						logger.info("Axis toggled to %s (blink_p=%.2f)", axis_mode, blink_prob)
 
 					x_new_filt = live_filter.process(x_new)
 					live_buffer = np.concatenate((live_buffer, x_new_filt), axis=1)
@@ -351,7 +397,7 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 
 			if pred_clock.getTime() < task_cfg.live_update_interval_s:
 				status.text = (
-					f"axis={axis_mode.upper()}  jaw_p={jaw_prob:.2f}  updates={prediction_count}  {live_note}"
+					f"axis={axis_mode.upper()}  rest={rest_prob:.2f} jaw={jaw_prob:.2f} blink={blink_prob:.2f}  updates={prediction_count}  {live_note}"
 				)
 				_draw_frame()
 				continue
@@ -420,7 +466,7 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 				f"raw={raw_command:+.2f}  ema={ema_command:+.2f}"
 			)
 			status.text = (
-				f"pred={latest_pred_code}  jaw_p={jaw_prob:.2f}  updates={prediction_count}  {live_note}"
+				f"pred={latest_pred_code} face_pred={face_pred_code}  rest={rest_prob:.2f} jaw={jaw_prob:.2f} blink={blink_prob:.2f}  updates={prediction_count}  {live_note}"
 			)
 			_draw_frame()
 
