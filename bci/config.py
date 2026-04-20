@@ -285,19 +285,25 @@ class MICursorTaskConfig:
 
     # Optional jaw-clench pause/resume control for the steering task.
     # When enabled, the task starts paused and jaw clench toggles movement.
-    enable_jaw_clench_pause: bool = False
+    enable_jaw_clench_pause: bool = True
     # Jaw clench probability threshold for pause/resume toggling.
     jaw_clench_prob_thresh: float = 0.70
     # Minimum time between accepted jaw-clench toggles.
     jaw_clench_refractory_s: float = 0.70
-    # Calibration trial count per jaw class (REST and CLENCH).
-    jaw_calibration_trials_per_class: int = 5
+    # Number of long calibration blocks per jaw class (REST and CLENCH).
+    jaw_calibration_blocks_per_class: int = 3
     # Preparation time before each jaw calibration trial.
     jaw_calibration_prep_s: float = 2.5
-    # Hold duration for each jaw calibration trial.
-    jaw_calibration_hold_s: float = 1.2
-    # Rest interval between jaw calibration trials.
+    # Hold duration for each jaw calibration block.
+    jaw_calibration_hold_s: float = 5.0
+    # Trim this much off the start and end of each calibration block before
+    # windowing so training better reflects sustained steady-state behavior.
+    jaw_calibration_trim_s: float = 0.5
+    # Rest interval between jaw calibration blocks.
     jaw_calibration_iti_s: float = 1.5
+    # Jaw classifier sliding-window definition shared by training and online use.
+    jaw_window_s: float = 0.60
+    jaw_window_step_s: float = 0.10
 
     calirate_on_participant: str = "mi"
 
