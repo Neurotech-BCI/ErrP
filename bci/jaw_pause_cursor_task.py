@@ -13,7 +13,7 @@ from psychopy import core, event, visual
 from mne_lsl.stream import StreamLSL
 
 from config import EEGConfig, LSLConfig, MentalCommandLabelConfig, MentalCommandModelConfig, MICursorTaskConfig, StimConfig
-from derick_ml_jawclench import build_jaw_clench_classifier, extract_jaw_features, select_jaw_channel_indices
+from derick_ml_jawclench import run_visual_jaw_calibration, select_jaw_channel_indices, update_live_jaw_clench_state
 from mental_command_worker import (
     StreamingIIRFilter,
     canonicalize_channel_name,
@@ -403,103 +403,23 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
 
         if stream is None:
             return
-
-        original_layout = {
-            "cue_pos": cue.pos,
-            "info_pos": info.pos,
-            "status_pos": status.pos,
-            "cue_h": cue.height,
-            "info_h": info.height,
-            "status_h": status.height,
-        }
-        cue.pos = (0.0, 0.26)
-        info.pos = (0.0, 0.10)
-        status.pos = (0.0, -0.06)
-        cue.height = 0.065
-        info.height = 0.052
-        status.height = 0.048
-
-        n_per_class = 5
-        hold_s = 1.2
-        prep_s = 2.5
-        iti_s = 1.5
-        min_samples = jaw_window_n
-
-        cue.text = "Jaw calibration"
-        info.text = "We will collect REST and JAW CLENCH trials to train a pause classifier."
-        status.text = "Press SPACE to begin calibration. ESC to quit."
-        _wait_for_space("Jaw calibration")
-
-        try:
-            labels = [0] * n_per_class + [1] * n_per_class
-            np.random.default_rng().shuffle(labels)
-            X_cal: list[np.ndarray] = []
-            y_cal: list[int] = []
-
-            for i, y_label in enumerate(labels, start=1):
-                is_clench = bool(y_label == 1)
-                trial_name = "JAW CLENCH" if is_clench else "REST"
-
-                cue.text = "Prepare"
-                info.text = f"Next trial: {trial_name}"
-                status.text = f"Calibration {i}/{len(labels)}"
-                _wait_for_seconds(prep_s)
-
-                cue.text = trial_name
-                info.text = (
-                    "Clench jaw and hold." if is_clench else "Relax face and avoid blinking/movement."
-                )
-                status.text = f"Hold for {hold_s:.1f}s"
-                block = _collect_stream_block(hold_s)
-
-                if block.shape[1] >= min_samples:
-                    feat_block = block[:, -min_samples:]
-                    X_cal.append(extract_jaw_features(feat_block, jaw_idxs))
-                    y_cal.append(int(y_label))
-                else:
-                    logger.warning(
-                        "Skipping short calibration block %d: samples=%d, needed=%d",
-                        i,
-                        int(block.shape[1]),
-                        int(min_samples),
-                    )
-
-                cue.text = "Relax"
-                info.text = "Short break"
-                status.text = ""
-                _wait_for_seconds(iti_s)
-
-            if len(y_cal) < 6 or len(set(y_cal)) < 2:
-                raise RuntimeError(
-                    "Jaw calibration failed: not enough usable rest/clench samples. "
-                    "Please rerun and reduce movement/blinks during REST trials."
-                )
-
-            X_np = np.asarray(X_cal, dtype=np.float32)
-            y_np = np.asarray(y_cal, dtype=int)
-            jaw_classifier = build_jaw_clench_classifier()
-            jaw_classifier.fit(X_np, y_np)
-            train_acc = float(jaw_classifier.score(X_np, y_np))
-            logger.info(
-                "Jaw calibration complete: samples=%d, rest=%d, clench=%d, train_acc=%.3f, jaw_channels=%s",
-                int(len(y_np)),
-                int(np.sum(y_np == 0)),
-                int(np.sum(y_np == 1)),
-                train_acc,
-                [model_ch_names[idx] for idx in jaw_idxs],
-            )
-
-            cue.text = "Calibration complete"
-            info.text = f"Jaw classifier ready (train acc {train_acc:.2f})"
-            status.text = "Jaw clench toggles pause/play. Press SPACE to start task."
-            _wait_for_space("Calibration complete")
-        finally:
-            cue.pos = original_layout["cue_pos"]
-            info.pos = original_layout["info_pos"]
-            status.pos = original_layout["status_pos"]
-            cue.height = original_layout["cue_h"]
-            info.height = original_layout["info_h"]
-            status.height = original_layout["status_h"]
+        jaw_classifier, _train_acc, _y_np = run_visual_jaw_calibration(
+            cue=cue,
+            info=info,
+            status=status,
+            wait_for_space=_wait_for_space,
+            wait_for_seconds=_wait_for_seconds,
+            collect_stream_block=_collect_stream_block,
+            jaw_idxs=jaw_idxs,
+            jaw_window_n=jaw_window_n,
+            model_ch_names=model_ch_names,
+            logger=logger,
+            n_per_class=5,
+            hold_s=1.2,
+            prep_s=2.5,
+            iti_s=1.5,
+            min_total_samples=6,
+        )
 
     def _toggle_pause(reason: str) -> None:
         nonlocal is_paused, jaw_last_toggle_t
@@ -523,20 +443,22 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
                 x_new = np.asarray(data[:, mask], dtype=np.float32)
                 last_live_ts = float(ts_arr[mask][-1])
 
-                jaw_buffer = np.concatenate((jaw_buffer, x_new), axis=1)
-                max_keep = max(keep_n, jaw_window_n)
-                if jaw_buffer.shape[1] > max_keep:
-                    jaw_buffer = jaw_buffer[:, -max_keep:]
-
-                if jaw_classifier is not None and jaw_buffer.shape[1] >= jaw_window_n:
-                    jaw_win = jaw_buffer[:, -jaw_window_n:]
-                    feat = extract_jaw_features(jaw_win, jaw_idxs).reshape(1, -1)
-                    jaw_prob = float(jaw_classifier.predict_proba(feat)[0, 1])
-                    jaw_pred = int(jaw_prob >= jaw_prob_thresh)
-                    now_t = core.getTime()
-                    if jaw_pred == 1 and jaw_prev_pred == 0 and (now_t - jaw_last_toggle_t) >= jaw_refractory_s:
-                        _toggle_pause(reason=f"jaw_clench p={jaw_prob:.2f}")
-                    jaw_prev_pred = jaw_pred
+                jaw_buffer, jaw_prob, jaw_prev_pred, should_toggle = update_live_jaw_clench_state(
+                    jaw_buffer=jaw_buffer,
+                    x_new=x_new,
+                    keep_n=keep_n,
+                    jaw_window_n=jaw_window_n,
+                    jaw_classifier=jaw_classifier,
+                    jaw_idxs=jaw_idxs,
+                    jaw_prob=jaw_prob,
+                    jaw_prev_pred=jaw_prev_pred,
+                    jaw_prob_thresh=jaw_prob_thresh,
+                    jaw_last_toggle_t=jaw_last_toggle_t,
+                    jaw_refractory_s=jaw_refractory_s,
+                    now_t=core.getTime(),
+                )
+                if should_toggle:
+                    _toggle_pause(reason=f"jaw_clench p={jaw_prob:.2f}")
 
                 x_new_filt = live_filter.process(x_new)
                 live_buffer = np.concatenate((live_buffer, x_new_filt), axis=1)
