@@ -9,13 +9,11 @@ from datetime import datetime
 
 import numpy as np
 from psychopy import core, event, visual
-from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
 
 from mne_lsl.stream import StreamLSL
 
 from config import EEGConfig, LSLConfig, MentalCommandLabelConfig, MentalCommandModelConfig, MICursorTaskConfig, StimConfig
+from derick_ml_jawclench import build_jaw_clench_classifier, extract_jaw_features, select_jaw_channel_indices
 from mental_command_worker import (
     StreamingIIRFilter,
     canonicalize_channel_name,
@@ -98,43 +96,6 @@ def _sample_target_position(
         if float(np.linalg.norm(candidate - avoid)) >= min_distance:
             return candidate
     return np.array([0.0, 0.0], dtype=np.float64)
-
-
-def _select_jaw_channel_indices(ch_names: list[str]) -> list[int]:
-    priority = {"FP1", "FP2", "AF3", "AF4", "F7", "F8", "F3", "F4"}
-    idxs = [i for i, name in enumerate(ch_names) if canonicalize_channel_name(name) in priority]
-    if idxs:
-        return idxs
-    # Fallback: use all available channels when frontal channels are absent.
-    return list(range(len(ch_names)))
-
-
-def _extract_jaw_features(block: np.ndarray, jaw_idxs: list[int]) -> np.ndarray:
-    X = np.asarray(block, dtype=np.float32)
-    if X.ndim != 2:
-        raise ValueError(f"Expected shape (n_channels, n_samples), got {X.shape}")
-    if X.shape[1] < 2:
-        return np.zeros(12, dtype=np.float32)
-
-    if jaw_idxs:
-        X = X[jaw_idxs]
-
-    X = X - np.mean(X, axis=1, keepdims=True)
-    ptp = np.ptp(X, axis=1)
-    rms = np.sqrt(np.mean(np.square(X), axis=1))
-    mav = np.mean(np.abs(X), axis=1)
-    line_len = np.mean(np.abs(np.diff(X, axis=1)), axis=1)
-
-    def _summary(v: np.ndarray) -> list[float]:
-        return [float(np.mean(v)), float(np.max(v)), float(np.std(v))]
-
-    features = (
-        _summary(ptp)
-        + _summary(rms)
-        + _summary(mav)
-        + _summary(line_len)
-    )
-    return np.asarray(features, dtype=np.float32)
 
 
 def run_task(fname: str, debug_mode: bool = False) -> None:
@@ -335,7 +296,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
     reject_thresh = eeg_cfg.reject_peak_to_peak
     last_live_ts: float | None = None
 
-    jaw_idxs = _select_jaw_channel_indices(model_ch_names)
+    jaw_idxs = select_jaw_channel_indices(model_ch_names)
     jaw_classifier = None
     jaw_prob = 0.0
     jaw_prev_pred = 0
@@ -493,7 +454,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
 
                 if block.shape[1] >= min_samples:
                     feat_block = block[:, -min_samples:]
-                    X_cal.append(_extract_jaw_features(feat_block, jaw_idxs))
+                    X_cal.append(extract_jaw_features(feat_block, jaw_idxs))
                     y_cal.append(int(y_label))
                 else:
                     logger.warning(
@@ -516,15 +477,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
 
             X_np = np.asarray(X_cal, dtype=np.float32)
             y_np = np.asarray(y_cal, dtype=int)
-            jaw_classifier = make_pipeline(
-                StandardScaler(),
-                LogisticRegression(
-                    random_state=42,
-                    class_weight="balanced",
-                    solver="liblinear",
-                    max_iter=1000,
-                ),
-            )
+            jaw_classifier = build_jaw_clench_classifier()
             jaw_classifier.fit(X_np, y_np)
             train_acc = float(jaw_classifier.score(X_np, y_np))
             logger.info(
@@ -577,7 +530,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
 
                 if jaw_classifier is not None and jaw_buffer.shape[1] >= jaw_window_n:
                     jaw_win = jaw_buffer[:, -jaw_window_n:]
-                    feat = _extract_jaw_features(jaw_win, jaw_idxs).reshape(1, -1)
+                    feat = extract_jaw_features(jaw_win, jaw_idxs).reshape(1, -1)
                     jaw_prob = float(jaw_classifier.predict_proba(feat)[0, 1])
                     jaw_pred = int(jaw_prob >= jaw_prob_thresh)
                     now_t = core.getTime()
