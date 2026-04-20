@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import Pipeline, make_pipeline
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from mental_command_worker import canonicalize_channel_name
@@ -64,15 +64,18 @@ def build_jaw_clench_classifier(
     max_iter: int = 1000,
 ) -> Pipeline:
     """Build the default jaw-clench binary classifier pipeline."""
-    return make_pipeline(
-        StandardScaler(),
-        LogisticRegression(
-            random_state=int(random_state),
-            class_weight=class_weight,
-            solver=str(solver),
-            max_iter=int(max_iter),
+    return Pipeline([
+        ("scaler", StandardScaler()),
+        (
+            "clf",
+            LogisticRegression(
+                random_state=int(random_state),
+                class_weight=class_weight,
+                solver=str(solver),
+                max_iter=int(max_iter),
+            ),
         ),
-    )
+    ])
 
 
 def train_jaw_clench_classifier(
@@ -481,7 +484,13 @@ def update_live_face_event_state(
         updated_jaw = float(probs[idx_jaw])
         updated_blink = float(probs[idx_blink])
 
-        pred_code = int(face_classifier.named_steps["clf"].classes_[int(np.argmax(probs))])
+        classes = np.asarray(getattr(face_classifier, "classes_", []), dtype=int)
+        if classes.size == 0 and hasattr(face_classifier, "named_steps") and "clf" in face_classifier.named_steps:
+            classes = np.asarray(face_classifier.named_steps["clf"].classes_, dtype=int)
+        if classes.size == 0:
+            raise ValueError("Face classifier has no classes_ attribute after fitting.")
+
+        pred_code = int(classes[int(np.argmax(probs))])
         jaw_pred = int(pred_code == JAW_CLENCH_CLASS_CODE and updated_jaw >= float(jaw_prob_thresh))
         blink_pred = int(pred_code == RAPID_BLINK_CLASS_CODE and updated_blink >= float(blink_prob_thresh))
 

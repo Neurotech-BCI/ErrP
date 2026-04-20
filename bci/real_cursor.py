@@ -322,7 +322,11 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 		with open(f"{fname}_real_cursor_face_event_model.pkl", "wb") as fh:
 			pickle.dump(face_classifier, fh)
 
-		face_classes = np.asarray(face_classifier.named_steps["clf"].classes_, dtype=int)
+		face_classes = np.asarray(getattr(face_classifier, "classes_", []), dtype=int)
+		if face_classes.size == 0 and hasattr(face_classifier, "named_steps") and "clf" in face_classifier.named_steps:
+			face_classes = np.asarray(face_classifier.named_steps["clf"].classes_, dtype=int)
+		if face_classes.size == 0:
+			raise RuntimeError("Face-event classifier has no classes_ after calibration.")
 		face_class_index = {int(c): i for i, c in enumerate(face_classes)}
 		for needed in (REST_CLASS_CODE, JAW_CLENCH_CLASS_CODE, RAPID_BLINK_CLASS_CODE):
 			if int(needed) not in face_class_index:
