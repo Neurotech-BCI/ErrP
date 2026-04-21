@@ -72,13 +72,13 @@ def _build_virtual_keyboard(win: visual.Window) -> list[dict]:
         ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
         ["A", "S", "D", "F", "G", "H", "J", "K", "L"],
         ["Z", "X", "C", "V", "B", "N", "M"],
-        ["SPACE", "BKSP", "CLR"],
+        ["SPACE", "BKSP", "ENTER"],
     ]
 
     width_scale = {
         "SPACE": 3.6,
         "BKSP": 2.0,
-        "CLR": 1.7,
+        "ENTER": 1.9,
     }
 
     base_w = 0.125
@@ -123,8 +123,8 @@ def _apply_key_to_buffer(current_text: str, key_label: str, max_chars: int) -> s
         next_text = current_text + " "
     elif key_label == "BKSP":
         next_text = current_text[:-1]
-    elif key_label == "CLR":
-        next_text = ""
+    elif key_label == "ENTER":
+        next_text = current_text
     else:
         next_text = current_text + key_label
 
@@ -136,7 +136,7 @@ def _apply_key_to_buffer(current_text: str, key_label: str, max_chars: int) -> s
 def run_task(
     fname: str,
     move_confidence_thresh: float = 0.60,
-    cursor_step_s: float = 0.35,
+    cursor_step_s: float = 0.70,
     jaw_select_refractory_s: float = 0.35,
     max_text_chars: int = 320,
 ) -> None:
@@ -518,6 +518,7 @@ def run_task(
         prediction_count += 1
         live_note = "tracking"
 
+    submitted_text: str | None = None
     try:
         while True:
             pressed = event.getKeys()
@@ -554,6 +555,16 @@ def run_task(
             jaw_event = _poll_jaw_clench()
             if jaw_event:
                 selected_label = str(keys[cursor_index]["label"])
+                if selected_label == "ENTER":
+                    submitted_text = typed_text
+                    logger.info(
+                        "Jaw select: key=%s | typed_len=%d | jaw_p=%.3f | submitted_text=%r",
+                        selected_label,
+                        len(typed_text),
+                        jaw_prob,
+                        submitted_text,
+                    )
+                    break
                 typed_text = _apply_key_to_buffer(
                     current_text=typed_text,
                     key_label=selected_label,
@@ -581,6 +592,8 @@ def run_task(
     except KeyboardInterrupt:
         logger.info("Session interrupted by user.")
     finally:
+        if submitted_text is not None:
+            logger.info("Keyboard submission complete. Ending task with text=%r", submitted_text)
         try:
             stream.disconnect()
         except Exception:
@@ -602,7 +615,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cursor-step-s",
         type=float,
-        default=0.35,
+        default=0.70,
         help="Minimum time between cursor moves when MI confidence is above threshold",
     )
     parser.add_argument(

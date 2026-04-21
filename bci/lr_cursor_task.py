@@ -401,11 +401,13 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
     ema_command = 0.0
     live_note = "warming up"
     latest_pred_code: int | None = None
+    discrete_command = 0.0
     bias_offset = float(task_cfg.live_bias_offset) if bool(task_cfg.enable_live_bias_offset) else 0.0
+    use_discrete_command_ema = bool(getattr(task_cfg, "enable_discrete_command_ema", False))
 
     def _reset_decoder_state() -> None:
         nonlocal last_live_ts, live_buffer, prediction_count
-        nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note, latest_pred_code
+        nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note, latest_pred_code, discrete_command
         live_filter.reset()
         live_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
         last_live_ts = None
@@ -417,11 +419,12 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
         raw_command = 0.0
         ema_command = 0.0
         latest_pred_code = None
+        discrete_command = 0.0
         live_note = "trial reset"
 
     def _poll_live_decoder(pull_enabled: bool = True) -> None:
         nonlocal last_live_ts, live_buffer, prediction_count
-        nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note, latest_pred_code
+        nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note, latest_pred_code, discrete_command
 
         if pull_enabled:
             data, ts = stream.get_data(winsize=stream_pull_s, picks="all")
@@ -447,6 +450,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
             needed_s = max(0.0, (window_n - live_buffer.shape[1]) / sfreq)
             raw_command = 0.0
             ema_command *= 0.95
+            discrete_command = 0.0
             live_note = f"warming up ({needed_s:.1f}s)"
             return
 
@@ -455,6 +459,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
         if reject_thresh is not None and max_ptp > float(reject_thresh):
             raw_command = 0.0
             ema_command *= 0.85
+            discrete_command = 0.0
             live_note = "artifact reject"
             return
 
@@ -469,13 +474,16 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
         raw_command = float(np.clip(right_prob - left_prob + bias_offset, -1.0, 1.0))
         if int(task_cfg.rest_class_code) in class_index and rest_prob >= max(left_prob, right_prob):
             latest_pred_code = int(task_cfg.rest_class_code)
+            discrete_command = 0.0
         else:
             latest_pred_code = int(stim_cfg.right_code) if raw_command >= 0.0 else int(stim_cfg.left_code)
+            discrete_command = 1.0 if latest_pred_code == int(stim_cfg.right_code) else -1.0
         alpha = float(np.clip(task_cfg.command_ema_alpha, 0.0, 1.0))
+        ema_target = discrete_command if use_discrete_command_ema else raw_command
         if prediction_count == 0:
-            ema_command = raw_command
+            ema_command = ema_target
         else:
-            ema_command = (1.0 - alpha) * ema_command + alpha * raw_command
+            ema_command = (1.0 - alpha) * ema_command + alpha * ema_target
         prediction_count += 1
         live_note = "tracking"
 
@@ -588,7 +596,13 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
                 dt = float(np.clip(now_t - last_frame_t, 1e-4, 0.05))
                 last_frame_t = now_t
 
-                if latest_pred_code == int(stim_cfg.left_code):
+                if use_discrete_command_ema:
+                    command_drive = _apply_deadband(ema_command, float(task_cfg.command_deadband))
+                    proposed_pos = cursor_pos + np.array(
+                        [float(task_cfg.forward_speed_norm_s) * command_drive * dt, 0.0],
+                        dtype=np.float64,
+                    )
+                elif latest_pred_code == int(stim_cfg.left_code):
                     proposed_pos = cursor_pos + np.array([-float(task_cfg.forward_speed_norm_s) * dt, 0.0], dtype=np.float64)
                 elif latest_pred_code == int(stim_cfg.right_code):
                     proposed_pos = cursor_pos + np.array([float(task_cfg.forward_speed_norm_s) * dt, 0.0], dtype=np.float64)
@@ -620,6 +634,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
                 parts.extend([
                     f"pred={latest_pred_code}",
                     f"raw={raw_command:+.2f}",
+                    f"ema={ema_command:+.2f}",
                     f"bias={bias_offset:+.2f}",
                 ])
                 info.text = "   ".join(parts)

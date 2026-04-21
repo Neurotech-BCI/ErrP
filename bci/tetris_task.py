@@ -135,6 +135,15 @@ def _prompt_prefix() -> str:
         print("Name cannot be empty.")
 
 
+def _apply_deadband(value: float, deadband: float) -> float:
+    value = float(np.clip(value, -1.0, 1.0))
+    deadband = float(np.clip(deadband, 0.0, 0.99))
+    if abs(value) <= deadband:
+        return 0.0
+    scaled = (abs(value) - deadband) / (1.0 - deadband)
+    return float(np.copysign(scaled, value))
+
+
 # ---------------------------------------------------------------------------
 # Tetris board logic
 # ---------------------------------------------------------------------------
@@ -671,7 +680,9 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
     ema_command = 0.0
     live_note = "warming up"
     latest_pred_code: int | None = None
+    discrete_command = 0.0
     bias_offset = float(task_cfg.live_bias_offset) if bool(task_cfg.enable_live_bias_offset) else 0.0
+    use_discrete_command_ema = bool(getattr(task_cfg, "enable_discrete_command_ema", False))
 
     def _pull_stream_and_update_buffers() -> None:
         nonlocal last_live_ts, live_buffer, jaw_buffer
@@ -715,7 +726,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
 
     def _poll_decoder() -> None:
         nonlocal prediction_count
-        nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note, latest_pred_code
+        nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note, latest_pred_code, discrete_command
 
         if pred_clock.getTime() < task_cfg.live_update_interval_s:
             return
@@ -724,6 +735,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
         if live_buffer.shape[1] < window_n:
             needed_s = max(0.0, (window_n - live_buffer.shape[1]) / sfreq)
             live_note = f"warming up ({needed_s:.1f}s)"
+            discrete_command = 0.0
             return
 
         x_win = live_buffer[:, -window_n:]
@@ -732,6 +744,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
             live_note = "artifact reject"
             raw_command = 0.0
             ema_command *= 0.85
+            discrete_command = 0.0
             return
 
         p_vec = classifier.predict_proba(x_win[np.newaxis, ...])[0]
@@ -742,11 +755,14 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
 
         if int(task_cfg.rest_class_code) in class_index and rest_prob >= max(left_prob, right_prob):
             latest_pred_code = int(task_cfg.rest_class_code)
+            discrete_command = 0.0
         else:
             latest_pred_code = int(stim_cfg.right_code) if raw_command >= 0.0 else int(stim_cfg.left_code)
+            discrete_command = 1.0 if latest_pred_code == int(stim_cfg.right_code) else -1.0
 
         alpha = float(np.clip(task_cfg.command_ema_alpha, 0.0, 1.0))
-        ema_command = raw_command if prediction_count == 0 else (1.0 - alpha) * ema_command + alpha * raw_command
+        ema_target = discrete_command if use_discrete_command_ema else raw_command
+        ema_command = ema_target if prediction_count == 0 else (1.0 - alpha) * ema_command + alpha * ema_target
         prediction_count += 1
         live_note = "tracking"
 
@@ -764,9 +780,18 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
         nonlocal last_move_t
         if now - last_move_t < MOVE_COOLDOWN_S:
             return False
-        if latest_pred_code == int(stim_cfg.left_code):
+        move_pred_code = latest_pred_code
+        if use_discrete_command_ema:
+            command_drive = _apply_deadband(ema_command, float(task_cfg.command_deadband))
+            if command_drive > 0.0:
+                move_pred_code = int(stim_cfg.right_code)
+            elif command_drive < 0.0:
+                move_pred_code = int(stim_cfg.left_code)
+            else:
+                move_pred_code = None
+        if move_pred_code == int(stim_cfg.left_code):
             moved = board.move_left()
-        elif latest_pred_code == int(stim_cfg.right_code):
+        elif move_pred_code == int(stim_cfg.right_code):
             moved = board.move_right()
         else:
             return False
@@ -830,6 +855,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
             left_prob = right_prob = 0.5
             rest_prob = raw_command = ema_command = 0.0
             latest_pred_code = None
+            discrete_command = 0.0
             live_note = "warming up"
 
             logger.info("New Tetris game started.")
