@@ -443,11 +443,13 @@ class SubwayRunnerGame:
         blocked_side = self.rng.choice((-1, 1))
         open_lane = -blocked_side
 
-        obstacles.append({"lane": 0, "y": 1.02, "kind": "high"})
-        obstacles.append({"lane": int(blocked_side), "y": 1.02, "kind": "high"})
+        # Depth `y` runs from horizon (0.0) to player row (1.0). Spawn clusters
+        # near the horizon so they travel toward the player over time.
+        obstacles.append({"lane": 0, "y": 0.05, "kind": "high"})
+        obstacles.append({"lane": int(blocked_side), "y": 0.05, "kind": "high"})
 
         if self.rng.random() < 0.55:
-            obstacles.append({"lane": int(open_lane), "y": 1.16, "kind": "low"})
+            obstacles.append({"lane": int(open_lane), "y": 0.19, "kind": "low"})
 
     def _reset_decoder_state(self) -> None:
         self.live_filter.reset()
@@ -695,8 +697,8 @@ class SubwayRunnerGame:
 
                 remove_count = 0
                 for ob in obstacles:
-                    ob["y"] = float(ob["y"]) - world_speed * dt
-                while obstacles and float(obstacles[0]["y"]) < -0.10:
+                    ob["y"] = float(ob["y"]) + world_speed * dt
+                while obstacles and float(obstacles[0]["y"]) > 1.10:
                     obstacles.pop(0)
                     remove_count += 1
                 if remove_count > 0:
