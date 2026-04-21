@@ -266,7 +266,7 @@ class MICursorTaskConfig:
     cursor_radius: float = 0.028
     # Increase `target_radius` to make targets easier to hit.
     # Decrease it to make the task more demanding.
-    target_radius: float = 0.055
+    target_radius: float = 0.110
     # Increase `target_min_distance_from_center` to force larger steering movements.
     # Decrease it to allow easier, nearer targets.
     target_min_distance_from_center: float = 0.35
@@ -274,7 +274,7 @@ class MICursorTaskConfig:
     # Steering control dynamics.
     # Increase `forward_speed_norm_s` to make the task faster and harder.
     # Decrease it to give the user more time to steer.
-    forward_speed_norm_s: float = 0.24
+    forward_speed_norm_s: float = 0.48
     # Increase `max_turn_rate_deg_s` for tighter turns and more agility.
     # Decrease it for gentler, more stable arcs.
     max_turn_rate_deg_s: float = 95.0
@@ -454,7 +454,7 @@ class MentalCommandModelConfig:
 class SharedBCIConfig:
     participant_name: str = "participant"
     mi_cache_name: str = "mi_shared_lr_model"
-    jaw_calibration_blocks_per_class: int = 3
+    jaw_calibration_blocks_per_class: int = 4
     jaw_calibration_prep_s: float = 2.5
     jaw_calibration_hold_s: float = 5.0
     jaw_calibration_trim_s: float = 0.5
