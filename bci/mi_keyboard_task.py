@@ -18,7 +18,11 @@ from config import (
     MICursorTaskConfig,
     StimConfig,
 )
-from jaw_clench_detector import JawClenchDetector
+from derick_ml_jawclench import (
+    run_visual_jaw_calibration,
+    select_jaw_channel_indices,
+    update_live_jaw_clench_state,
+)
 from mental_command_worker import (
     StreamingIIRFilter,
     canonicalize_channel_name,
@@ -238,11 +242,25 @@ def run_task(
     with open(f"{fname}_mi_keyboard_model.pkl", "wb") as fh:
         pickle.dump(classifier, fh)
 
-    jaw_ch_idx = len(model_ch_names) - 1
-    jaw_detector = JawClenchDetector(fs=sfreq)
-    jaw_detector.refractory = max(0.60, float(jaw_select_refractory_s))
-    jaw_thresh_min = 8.0
-    jaw_calibration_duration_s = 5.0
+    jaw_idxs = select_jaw_channel_indices(model_ch_names)
+    jaw_window_n = int(round(float(task_cfg.jaw_window_s) * sfreq))
+    jaw_classifier = None
+    jaw_prob = 0.0
+    jaw_prev_pred = 0
+    jaw_event_pending = False
+    jaw_last_select_t = -1e9
+    jaw_prob_thresh = float(task_cfg.jaw_clench_prob_thresh)
+    jaw_refractory_s = max(float(task_cfg.jaw_clench_refractory_s), float(jaw_select_refractory_s))
+
+    logger.info(
+        "Jaw model config: channels=%s, jaw_window_s=%.2f, jaw_step_s=%.2f, trim_s=%.2f, threshold=%.2f, refractory_s=%.2f",
+        [model_ch_names[idx] for idx in jaw_idxs],
+        float(task_cfg.jaw_window_s),
+        float(task_cfg.jaw_window_step_s),
+        float(task_cfg.jaw_calibration_trim_s),
+        jaw_prob_thresh,
+        jaw_refractory_s,
+    )
 
     win = visual.Window(
         size=task_cfg.win_size,
@@ -309,38 +327,55 @@ def run_task(
                 return
             _draw_frame()
 
-    cue.text = "Jaw calibration"
-    info.text = "Keep your jaw relaxed to measure baseline activity."
-    status.text = "Press SPACE to start calibration. ESC to quit."
-    _wait_for_space("Jaw calibration")
+    def _wait_for_seconds(duration_s: float) -> None:
+        clock = core.Clock()
+        while clock.getTime() < duration_s:
+            if "escape" in event.getKeys():
+                raise KeyboardInterrupt
+            _draw_frame()
 
-    calib_raw: list[np.ndarray] = []
-    last_cal_ts: float | None = None
-    cal_clock = core.Clock()
-    while cal_clock.getTime() < jaw_calibration_duration_s:
-        if "escape" in event.getKeys():
-            raise KeyboardInterrupt
-        data, ts = stream.get_data(winsize=0.25, picks="all")
-        if data.size > 0 and ts is not None and len(ts) > 0:
-            ts_arr = np.asarray(ts)
-            mask = np.ones_like(ts_arr, bool) if last_cal_ts is None else (ts_arr > float(last_cal_ts))
-            if np.any(mask):
-                new_data = np.asarray(data[jaw_ch_idx, mask], dtype=np.float32)
-                last_cal_ts = float(ts_arr[mask][-1])
-                calib_raw.append(new_data)
-        remaining = max(0.0, jaw_calibration_duration_s - cal_clock.getTime())
-        cue.text = "Jaw calibration"
-        info.text = f"Keep jaw relaxed for {remaining:0.1f}s"
-        status.text = ""
-        _draw_frame()
+    def _collect_stream_block(duration_s: float) -> np.ndarray:
+        chunks: list[np.ndarray] = []
+        last_ts_local: float | None = None
+        clock = core.Clock()
+        while clock.getTime() < duration_s:
+            if "escape" in event.getKeys():
+                raise KeyboardInterrupt
+            data, ts = stream.get_data(winsize=min(0.20, duration_s), picks="all")
+            if data.size > 0 and ts is not None and len(ts) > 0:
+                ts_arr = np.asarray(ts)
+                mask = np.ones_like(ts_arr, dtype=bool) if last_ts_local is None else (ts_arr > float(last_ts_local))
+                if np.any(mask):
+                    chunks.append(np.asarray(data[:, mask], dtype=np.float32))
+                    last_ts_local = float(ts_arr[mask][-1])
+            _draw_frame()
 
-    if calib_raw:
-        try:
-            jaw_signal = np.concatenate(calib_raw).astype(np.float32)
-            floor = jaw_detector.calibrate(jaw_signal)
-            logger.info("Jaw detector calibrated: floor=%.3f", float(floor))
-        except Exception:
-            logger.warning("Jaw detector calibration method failed, continuing with adaptive threshold.")
+        if not chunks:
+            return np.empty((len(model_ch_names), 0), dtype=np.float32)
+        return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
+
+    jaw_classifier, jaw_train_acc, _jaw_y = run_visual_jaw_calibration(
+        cue=cue,
+        info=info,
+        status=status,
+        wait_for_space=_wait_for_space,
+        wait_for_seconds=_wait_for_seconds,
+        collect_stream_block=_collect_stream_block,
+        jaw_idxs=jaw_idxs,
+        jaw_window_n=jaw_window_n,
+        sfreq=sfreq,
+        model_ch_names=model_ch_names,
+        logger=logger,
+        n_per_class=int(task_cfg.jaw_calibration_blocks_per_class),
+        hold_s=float(task_cfg.jaw_calibration_hold_s),
+        prep_s=float(task_cfg.jaw_calibration_prep_s),
+        iti_s=float(task_cfg.jaw_calibration_iti_s),
+        window_s=float(task_cfg.jaw_window_s),
+        step_s=float(task_cfg.jaw_window_step_s),
+        edge_trim_s=float(task_cfg.jaw_calibration_trim_s),
+        min_total_samples=12,
+    )
+    logger.info("Jaw classifier ready: train_acc=%.3f", float(jaw_train_acc))
 
     cue.text = "Ready"
     info.text = "Imagine LEFT/RIGHT to move cursor. Jaw clench to select highlighted key."
@@ -359,8 +394,7 @@ def run_task(
     reject_thresh = eeg_cfg.reject_peak_to_peak
     last_live_ts: float | None = None
 
-    jaw_buffer_raw = np.empty(0, dtype=np.float32)
-    jaw_buffer_ts = np.empty(0, dtype=np.float64)
+    jaw_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
 
     pred_clock = core.Clock()
     prediction_count = 0
@@ -373,10 +407,9 @@ def run_task(
     bias_offset = float(task_cfg.live_bias_offset) if bool(task_cfg.enable_live_bias_offset) else 0.0
 
     last_move_t = -1e9
-    last_select_t = -1e9
-
     def _pull_stream_and_update_buffers() -> None:
-        nonlocal last_live_ts, live_buffer, jaw_buffer_raw, jaw_buffer_ts
+        nonlocal last_live_ts, live_buffer, jaw_buffer
+        nonlocal jaw_prob, jaw_prev_pred, jaw_event_pending, jaw_last_select_t
 
         data, ts = stream.get_data(winsize=stream_pull_s, picks="all")
         if data.size == 0 or ts is None or len(ts) == 0:
@@ -396,26 +429,36 @@ def run_task(
         if live_buffer.shape[1] > keep_n:
             live_buffer = live_buffer[:, -keep_n:]
 
-        jaw_raw_new = np.asarray(x_new[jaw_ch_idx], dtype=np.float32)
-        jaw_buffer_raw = np.concatenate((jaw_buffer_raw, jaw_raw_new))
-        jaw_buffer_ts = np.concatenate((jaw_buffer_ts, t_new))
-
-        keep = int(max(sfreq, window_n))
-        if jaw_buffer_raw.size > keep:
-            jaw_buffer_raw = jaw_buffer_raw[-keep:]
-            jaw_buffer_ts = jaw_buffer_ts[-keep:]
+        jaw_buffer, jaw_prob, jaw_prev_pred, should_select = update_live_jaw_clench_state(
+            jaw_buffer=jaw_buffer,
+            x_new=x_new,
+            keep_n=keep_n,
+            jaw_window_n=jaw_window_n,
+            jaw_classifier=jaw_classifier,
+            jaw_idxs=jaw_idxs,
+            jaw_prob=jaw_prob,
+            jaw_prev_pred=jaw_prev_pred,
+            jaw_prob_thresh=jaw_prob_thresh,
+            jaw_last_toggle_t=jaw_last_select_t,
+            jaw_refractory_s=jaw_refractory_s,
+            now_t=core.getTime(),
+        )
+        if should_select:
+            jaw_last_select_t = core.getTime()
+            jaw_event_pending = True
 
     def _poll_jaw_clench() -> bool:
-        if jaw_buffer_raw.size < 8 or jaw_buffer_ts.size < 8:
-            return False
-        _, clenches, _ = jaw_detector.detect(jaw_buffer_raw, jaw_buffer_ts, jaw_thresh_min)
-        return len(clenches) > 0
+        nonlocal jaw_event_pending
+        if jaw_event_pending:
+            jaw_event_pending = False
+            return True
+        return False
 
     def _poll_decoder() -> None:
         nonlocal prediction_count, left_prob, right_prob, raw_command, ema_command, live_note, latest_pred_code
 
         if pred_clock.getTime() < task_cfg.live_update_interval_s:
-            return
+            return False
         pred_clock.reset()
 
         if live_buffer.shape[1] < window_n:
@@ -485,7 +528,7 @@ def run_task(
 
             selected_text = ""
             jaw_event = _poll_jaw_clench()
-            if jaw_event and (now_t - last_select_t) >= float(jaw_select_refractory_s):
+            if jaw_event:
                 selected_label = str(keys[cursor_index]["label"])
                 typed_text = _apply_key_to_buffer(
                     current_text=typed_text,
@@ -493,17 +536,17 @@ def run_task(
                     max_chars=max_text_chars,
                 )
                 selected_text = f"selected={selected_label}"
-                last_select_t = now_t
                 logger.info(
-                    "Jaw select: key=%s | typed_len=%d",
+                    "Jaw select: key=%s | typed_len=%d | jaw_p=%.3f",
                     selected_label,
                     len(typed_text),
+                    jaw_prob,
                 )
 
             cue.text = "LEFT/RIGHT MI moves cursor when confidence threshold is met. Jaw clench selects key."
             info.text = (
                 f"{label_cfg.left_name}={left_prob:.2f}   {label_cfg.right_name}={right_prob:.2f}   "
-                f"conf={conf:.2f}   raw={raw_command:+.2f}   ema={ema_command:+.2f}"
+                f"conf={conf:.2f}   raw={raw_command:+.2f}   ema={ema_command:+.2f}   jaw={jaw_prob:.2f}"
             )
             status.text = (
                 f"key={keys[cursor_index]['label']}   pred={latest_pred_code}   updates={prediction_count}   "
