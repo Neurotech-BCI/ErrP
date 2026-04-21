@@ -27,6 +27,7 @@ DEFAULT_BCI_ORCHESTRATOR_CONFIG = BCIOrchestratorConfig(
     },
     task_sequence=(
         OrchestratedTaskSpec(task_name="lr_cursor_task", repeats=1, max_trials=10),
+        OrchestratedTaskSpec(task_name="tetris_task", repeats=1, max_trials=10),
         OrchestratedTaskSpec(task_name="mi_cursor_task", repeats=1, max_trials=5),
     ),
 )
