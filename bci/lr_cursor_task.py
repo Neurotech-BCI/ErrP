@@ -159,6 +159,7 @@ def run_task(fname: str) -> None:
     cursor_color = (0.38, 0.84, 0.95)
     accent = (0.88, 0.92, 0.96)
     success_color = (0.38, 0.92, 0.56)
+    fail_color = (0.92, 0.28, 0.24)
 
     arena_limit_x = 1.0 - float(task_cfg.arena_margin) - float(task_cfg.cursor_radius)
     arena_limit_y = 1.0 - float(task_cfg.arena_margin) - float(task_cfg.cursor_radius)
@@ -203,11 +204,19 @@ def run_task(fname: str) -> None:
         lineColor=white,
         lineWidth=3.0,
     )
+    fail_line = visual.Line(
+        win,
+        start=(0.0, -target_limit_y),
+        end=(0.0, target_limit_y),
+        lineColor=fail_color,
+        lineWidth=3.0,
+    )
 
     cursor_pos = np.zeros(2, dtype=np.float64)
     heading_rad = math.pi / 2.0
     steering_state = 0.0
     target_pos = np.zeros(2, dtype=np.float64)
+    fail_line_x = 0.0
 
     def _update_cursor_visual() -> None:
         cursor.pos = (float(cursor_pos[0]), float(cursor_pos[1]))
@@ -220,6 +229,7 @@ def run_task(fname: str) -> None:
 
     def _draw_frame() -> None:
         arena_outline.draw()
+        fail_line.draw()
         target.draw()
         heading_line.draw()
         cursor.draw()
@@ -629,6 +639,10 @@ def run_task(fname: str) -> None:
                 parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
             parts.extend([f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", live_note])
             info.text = "   ".join(parts)
+            status.text = (
+                f"Score: {successful_trials}/{completed_trials}   "
+                "Press SPACE to start the next target. ESC to stop."
+            )
             _draw_frame()
             keys = event.getKeys()
             if "escape" in keys:
@@ -654,10 +668,15 @@ def run_task(fname: str) -> None:
                 parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
             parts.extend([f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", "startup delay"])
             info.text = "   ".join(parts)
+            status.text = (
+                f"Score: {successful_trials}/{completed_trials}   "
+                f"Trial starts in {remaining:.1f}s"
+            )
             _draw_frame()
 
     trial_results: list[dict[str, float | int | tuple[float, float]]] = []
     completed_trials = 0
+    successful_trials = 0
     last_frame_t = core.getTime()
 
     try:
@@ -670,8 +689,12 @@ def run_task(fname: str) -> None:
                 min_distance=float(task_cfg.target_min_distance_from_center),
             )
             target.pos = (float(target_pos[0]), float(target_pos[1]))
+            fail_line_x = float(-target_pos[0])
+            fail_line.start = (fail_line_x, -target_limit_y)
+            fail_line.end = (fail_line_x, target_limit_y)
             status.text = (
-                f"Trials completed: {completed_trials}\n"
+                f"Score: {successful_trials}/{completed_trials}   "
+                f"Completed: {completed_trials}\n"
                 "Press SPACE to start the next target. ESC to stop."
             )
             _wait_for_space("Reach the target with left/right motor imagery")
@@ -733,20 +756,31 @@ def run_task(fname: str) -> None:
                 ])
                 info.text = "   ".join(parts)
                 status.text = (
+                    f"score={successful_trials}/{completed_trials}   "
                     f"time={trial_clock.getTime():.1f}s   "
                     f"distance={distance_to_target:.2f}   "
                     f"updates={prediction_count - trial_pred_start}   {live_note}"
                 )
                 _draw_frame()
 
-                if distance_to_target <= float(task_cfg.cursor_radius + task_cfg.target_radius):
+                hit_target = distance_to_target <= float(task_cfg.cursor_radius + task_cfg.target_radius)
+                hit_fail_line = abs(float(cursor_pos[0]) - fail_line_x) <= float(task_cfg.cursor_radius)
+                if hit_target or hit_fail_line:
                     completed_trials += 1
-                    target.fillColor = success_color
+                    trial_success = bool(hit_target)
+                    if trial_success:
+                        successful_trials += 1
+                        target.fillColor = success_color
+                    else:
+                        fail_line.lineColor = fail_color
                     trial_duration = float(trial_clock.getTime())
                     result = {
                         "trial": int(completed_trials),
                         "target_x": float(target_pos[0]),
                         "target_y": float(target_pos[1]),
+                        "fail_line_x": float(fail_line_x),
+                        "success": int(trial_success),
+                        "outcome": "target" if trial_success else "fail_line",
                         "duration_s": trial_duration,
                         "path_length": float(path_length),
                         "mean_abs_command": float(mean_abs_command_sum / max(command_samples, 1)),
@@ -761,13 +795,17 @@ def run_task(fname: str) -> None:
                         if "escape" in event.getKeys():
                             raise KeyboardInterrupt
                         _poll_live_decoder()
-                        cue.text = "Target reached"
+                        cue.text = "Target reached" if trial_success else "Hit mirrored fail line"
                         info.text = (
                             f"time={trial_duration:.1f}s   path={path_length:.2f}   "
-                            f"updates={prediction_count - trial_pred_start}"
+                            f"updates={prediction_count - trial_pred_start}   "
+                            f"score={successful_trials}/{completed_trials}"
                         )
-                        status.text = "Press SPACE for the next target after the pause."
+                        status.text = (
+                            "Success" if trial_success else "Trial lost"
+                        ) + "   Press SPACE for the next target after the pause."
                         _draw_frame()
+                    fail_line.lineColor = fail_color
                     break
 
         # Unreachable because the loop exits via KeyboardInterrupt.
