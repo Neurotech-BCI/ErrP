@@ -20,6 +20,7 @@ from config import (
     MICursorTaskConfig,
     StimConfig,
 )
+from bci_runtime import apply_runtime_config_overrides, resolve_runtime_jaw_classifier, resolve_shared_mi_model
 from derick_ml_jawclench import (
     prepare_jaw_calibration_features,
     select_jaw_channel_indices,
@@ -28,14 +29,8 @@ from derick_ml_jawclench import (
 )
 from mental_command_worker import (
     StreamingIIRFilter,
-    append_windows_to_dataset,
     canonicalize_channel_name,
-    evaluate_loso_sessions,
-    load_offline_mi_dataset,
-    make_mi_classifier,
-    prepare_continuous_windows,
     resolve_channel_order,
-    train_or_load_shared_mi_model,
 )
 
 
@@ -249,7 +244,7 @@ class TetrisBoard:
 # Main task
 # ---------------------------------------------------------------------------
 
-def run_task(fname: str) -> None:  # noqa: C901
+def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
     logger = _make_task_logger(fname)
 
     lsl_cfg = LSLConfig()
@@ -263,6 +258,21 @@ def run_task(fname: str) -> None:  # noqa: C901
         h_freq=30.0,
         reject_peak_to_peak=150.0,
     )
+    cfgs = apply_runtime_config_overrides(
+        "tetris_task",
+        lsl_cfg=lsl_cfg,
+        stim_cfg=stim_cfg,
+        label_cfg=label_cfg,
+        task_cfg=task_cfg,
+        model_cfg=model_cfg,
+        eeg_cfg=eeg_cfg,
+    )
+    lsl_cfg = cfgs["lsl_cfg"]
+    stim_cfg = cfgs["stim_cfg"]
+    label_cfg = cfgs["label_cfg"]
+    task_cfg = cfgs["task_cfg"]
+    model_cfg = cfgs["model_cfg"]
+    eeg_cfg = cfgs["eeg_cfg"]
 
     stream = StreamLSL(
         bufsize=60.0,
@@ -429,15 +439,7 @@ def run_task(fname: str) -> None:  # noqa: C901
         win.flip()
 
     classifier = None
-    dataset = None
     class_index: dict[int, int] | None = None
-    rest_session_id: int | None = None
-    online_cal_session_id: int | None = None
-    train_only_session_ids: set[int] = set()
-    use_shared_model_cache = (
-        not bool(task_cfg.enable_online_rest_calibration)
-        and not bool(task_cfg.enable_online_lr_calibration)
-    )
 
     _draw_empty_board_screen(
         "Preparing MI model...",
@@ -445,171 +447,30 @@ def run_task(fname: str) -> None:  # noqa: C901
     )
 
     try:
-        if use_shared_model_cache:
-            shared_model = train_or_load_shared_mi_model(
-                cache_name="mi_shared_lr_model",
-                data_dir=task_cfg.data_dir,
-                edf_glob=task_cfg.edf_glob,
-                calibrate_on_participant=task_cfg.calirate_on_participant,
-                eeg_cfg=eeg_cfg,
-                task_cfg=task_cfg,
-                stim_cfg=stim_cfg,
-                model_cfg=model_cfg,
-                target_sfreq=sfreq,
-                target_channel_names=model_ch_names,
-                logger=logger,
-            )
-            classifier = shared_model.classifier
-            class_index = shared_model.class_index
-            loso = shared_model.loso
-            counts = Counter(shared_model.class_counts)
-            logger.info(
-                "Model ready from shared cache: loso_mean=%.4f, loso_std=%.4f, class_counts=%s, cache=%s",
-                loso.mean_accuracy,
-                loso.std_accuracy,
-                counts,
-                shared_model.cache_path,
-            )
-        else:
-            dataset = load_offline_mi_dataset(
-                data_dir=task_cfg.data_dir,
-                edf_glob=task_cfg.edf_glob,
-                eeg_cfg=eeg_cfg,
-                task_cfg=task_cfg,
-                stim_cfg=stim_cfg,
-                target_sfreq=sfreq,
-                target_channel_names=model_ch_names,
-                calibrateOnParticipant=task_cfg.calirate_on_participant,
-            )
-
-            def _collect_block_simple(dur: float) -> np.ndarray:
-                chunks: list[np.ndarray] = []
-                last_ts = None
-                clk = core.Clock()
-                while clk.getTime() < dur:
-                    if "escape" in event.getKeys():
-                        raise KeyboardInterrupt
-                    data, ts = stream.get_data(winsize=min(0.25, dur), picks="all")
-                    if data.size > 0 and ts is not None:
-                        ts_arr = np.asarray(ts)
-                        mask = np.ones_like(ts_arr, bool) if last_ts is None else (ts_arr > float(last_ts))
-                        if np.any(mask):
-                            chunks.append(np.asarray(data[:, mask], np.float32))
-                            last_ts = float(ts_arr[mask][-1])
-                    _draw_empty_board_screen(
-                        "REST calibration",
-                        f"Relax for {max(0.0, dur - clk.getTime()):0.1f}s",
-                    )
-                return np.concatenate(chunks, axis=1) if chunks else np.empty((len(model_ch_names), 0), np.float32)
-
-            if bool(task_cfg.enable_online_rest_calibration):
-                _draw_empty_board_screen(
-                    "REST calibration",
-                    "Press SPACE to start. ESC to quit.",
-                )
-                while True:
-                    keys = event.getKeys()
-                    if "escape" in keys:
-                        raise KeyboardInterrupt
-                    if "space" in keys:
-                        break
-                    _draw_empty_board_screen(
-                        "REST calibration",
-                        "Press SPACE to start. ESC to quit.",
-                    )
-
-                rest_block = _collect_block_simple(float(task_cfg.rest_calibration_duration_s))
-                rest_wins = prepare_continuous_windows(
-                    raw_block=rest_block,
-                    eeg_cfg=eeg_cfg,
-                    sfreq=sfreq,
-                    window_s=float(task_cfg.window_s),
-                    step_s=float(task_cfg.window_step_s),
-                    reject_peak_to_peak=eeg_cfg.reject_peak_to_peak,
-                )
-                if rest_wins.shape[0] > 0:
-                    rest_session_id = -1
-                    train_only_session_ids.add(rest_session_id)
-                    rest_labels = np.full(rest_wins.shape[0], int(task_cfg.rest_class_code), dtype=int)
-                    dataset = append_windows_to_dataset(dataset, rest_wins, rest_labels, rest_session_id, n_trials_add=1)
-
-            if bool(task_cfg.enable_online_lr_calibration):
-                _draw_empty_board_screen(
-                    "Live LR calibration",
-                    "Press SPACE to begin. ESC to quit.",
-                )
-                while True:
-                    keys = event.getKeys()
-                    if "escape" in keys:
-                        raise KeyboardInterrupt
-                    if "space" in keys:
-                        break
-                    _draw_empty_board_screen(
-                        "Live LR calibration",
-                        "Press SPACE to begin. ESC to quit.",
-                    )
-
-                online_cal_session_id = int(np.max(dataset.session_ids)) + 1
-                cal_codes = (
-                    [int(stim_cfg.left_code)] * int(task_cfg.online_lr_calibration_reps_per_class)
-                    + [int(stim_cfg.right_code)] * int(task_cfg.online_lr_calibration_reps_per_class)
-                )
-                random.shuffle(cal_codes)
-                cal_windows_list: list[np.ndarray] = []
-                cal_labels_list: list[np.ndarray] = []
-
-                for idx, code in enumerate(cal_codes, 1):
-                    cname = label_cfg.left_name if int(code) == int(stim_cfg.left_code) else label_cfg.right_name
-                    _draw_empty_board_screen(f"Prepare: {cname}", f"Block {idx}/{len(cal_codes)}")
-                    clk = core.Clock()
-                    while clk.getTime() < float(task_cfg.online_lr_calibration_prep_s):
-                        if "escape" in event.getKeys():
-                            raise KeyboardInterrupt
-                        _draw_empty_board_screen(f"Prepare: {cname}", f"Block {idx}/{len(cal_codes)}")
-
-                    _draw_empty_board_screen(f"SUSTAIN {cname}", "")
-                    blk = _collect_block_simple(float(task_cfg.online_lr_calibration_hold_s))
-                    wins = prepare_continuous_windows(
-                        raw_block=blk,
-                        eeg_cfg=eeg_cfg,
-                        sfreq=sfreq,
-                        window_s=float(task_cfg.window_s),
-                        step_s=float(task_cfg.window_step_s),
-                        reject_peak_to_peak=eeg_cfg.reject_peak_to_peak,
-                    )
-                    if wins.shape[0] > 0:
-                        cal_windows_list.append(wins)
-                        cal_labels_list.append(np.full(wins.shape[0], int(code), dtype=int))
-
-                    _draw_empty_board_screen("", "Relax")
-                    clk2 = core.Clock()
-                    while clk2.getTime() < float(task_cfg.online_lr_calibration_iti_s):
-                        if "escape" in event.getKeys():
-                            raise KeyboardInterrupt
-                        _draw_empty_board_screen("", "Relax")
-
-                if cal_windows_list:
-                    X_on = np.concatenate(cal_windows_list, axis=0)
-                    y_on = np.concatenate(cal_labels_list, axis=0)
-                    dataset = append_windows_to_dataset(
-                        dataset=dataset,
-                        windows=X_on,
-                        labels=y_on,
-                        session_id=online_cal_session_id,
-                        n_trials_add=len(cal_codes),
-                    )
-
-            loso = evaluate_loso_sessions(dataset, model_cfg, train_only_session_ids=train_only_session_ids)
-            classifier = make_mi_classifier(model_cfg)
-            classifier.fit(dataset.X, dataset.y)
-            counts = Counter(dataset.y.tolist())
-            logger.info(
-                "Model ready: windows=%d, loso_mean=%.4f, loso_std=%.4f, class_counts=%s",
-                dataset.n_windows,
-                loso.mean_accuracy,
-                loso.std_accuracy,
-                counts,
-            )
+        shared_model = resolve_shared_mi_model(
+            cache_name="mi_shared_lr_model",
+            data_dir=task_cfg.data_dir,
+            edf_glob=task_cfg.edf_glob,
+            calibrate_on_participant=task_cfg.calirate_on_participant,
+            eeg_cfg=eeg_cfg,
+            task_cfg=task_cfg,
+            stim_cfg=stim_cfg,
+            model_cfg=model_cfg,
+            target_sfreq=sfreq,
+            target_channel_names=model_ch_names,
+            logger=logger,
+        )
+        classifier = shared_model.classifier
+        class_index = shared_model.class_index
+        loso = shared_model.loso
+        counts = Counter(shared_model.class_counts)
+        logger.info(
+            "Model ready from shared model: loso_mean=%.4f, loso_std=%.4f, class_counts=%s, cache=%s",
+            loso.mean_accuracy,
+            loso.std_accuracy,
+            counts,
+            shared_model.cache_path,
+        )
 
         clf_classes = np.asarray(classifier.named_steps["clf"].classes_, dtype=int)
         class_index = {int(c): i for i, c in enumerate(clf_classes)}
@@ -639,6 +500,12 @@ def run_task(fname: str) -> None:  # noqa: C901
 
         def _run_jaw_calibration() -> None:
             nonlocal jaw_classifier
+
+            runtime_jaw_classifier, runtime_train_acc = resolve_runtime_jaw_classifier(logger=logger, min_total_samples=12)
+            if runtime_jaw_classifier is not None:
+                jaw_classifier = runtime_jaw_classifier
+                logger.info("Using orchestrator-provided jaw calibration (train_acc=%.3f).", float(runtime_train_acc or 0.0))
+                return
 
             n_per_class = int(task_cfg.jaw_calibration_blocks_per_class)
             hold_s = float(task_cfg.jaw_calibration_hold_s)
@@ -932,6 +799,9 @@ def run_task(fname: str) -> None:  # noqa: C901
 
     try:
         while True:
+            if max_trials is not None and len(session_stats) >= int(max_trials):
+                logger.info("Reached max_trials=%d; ending task.", int(max_trials))
+                break
             board = TetrisBoard()
             drop_clock = core.Clock()
 

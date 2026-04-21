@@ -13,12 +13,12 @@ from psychopy import core, event, visual
 from mne_lsl.stream import StreamLSL
 
 from config import EEGConfig, LSLConfig, MentalCommandLabelConfig, MentalCommandModelConfig, MICursorTaskConfig, StimConfig
+from bci_runtime import apply_runtime_config_overrides, resolve_runtime_jaw_classifier, resolve_shared_mi_model
 from derick_ml_jawclench import run_visual_jaw_calibration, select_jaw_channel_indices, update_live_jaw_clench_state
 from mental_command_worker import (
     StreamingIIRFilter,
     canonicalize_channel_name,
     resolve_channel_order,
-    train_or_load_shared_mi_model,
 )
 
 
@@ -98,7 +98,7 @@ def _sample_target_position(
     return np.array([0.0, 0.0], dtype=np.float64)
 
 
-def run_task(fname: str, debug_mode: bool = False) -> None:
+def run_task(fname: str, debug_mode: bool = False, max_trials: int | None = None) -> None:
     logger = _make_task_logger(fname)
     lsl_cfg = LSLConfig()
     stim_cfg = StimConfig()
@@ -111,6 +111,21 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
         h_freq=30.0,
         reject_peak_to_peak=150.0,
     )
+    cfgs = apply_runtime_config_overrides(
+        "jaw_pause_cursor_task",
+        lsl_cfg=lsl_cfg,
+        stim_cfg=stim_cfg,
+        label_cfg=label_cfg,
+        task_cfg=task_cfg,
+        model_cfg=model_cfg,
+        eeg_cfg=eeg_cfg,
+    )
+    lsl_cfg = cfgs["lsl_cfg"]
+    stim_cfg = cfgs["stim_cfg"]
+    label_cfg = cfgs["label_cfg"]
+    task_cfg = cfgs["task_cfg"]
+    model_cfg = cfgs["model_cfg"]
+    eeg_cfg = cfgs["eeg_cfg"]
     rng = np.random.default_rng()
 
     logger.info("Starting jaw-pause cursor task | debug_mode=%s", bool(debug_mode))
@@ -157,7 +172,7 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
             task_cfg.window_step_s,
             sfreq,
         )
-        shared_model = train_or_load_shared_mi_model(
+        shared_model = resolve_shared_mi_model(
             cache_name="mi_shared_lr_model",
             data_dir=task_cfg.data_dir,
             edf_glob=task_cfg.edf_glob,
@@ -403,6 +418,11 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
 
         if stream is None:
             return
+        runtime_jaw_classifier, runtime_train_acc = resolve_runtime_jaw_classifier(logger=logger, min_total_samples=12)
+        if runtime_jaw_classifier is not None:
+            jaw_classifier = runtime_jaw_classifier
+            logger.info("Using orchestrator-provided jaw calibration (train_acc=%.3f).", float(runtime_train_acc or 0.0))
+            return
         jaw_classifier, _train_acc, _y_np = run_visual_jaw_calibration(
             cue=cue,
             info=info,
@@ -536,6 +556,9 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
 
     try:
         while True:
+            if max_trials is not None and target_hits >= int(max_trials):
+                logger.info("Reached max_trials=%d; ending task.", int(max_trials))
+                break
             keys = event.getKeys()
             if "escape" in keys:
                 raise KeyboardInterrupt

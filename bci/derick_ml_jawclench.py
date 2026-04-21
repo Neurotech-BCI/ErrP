@@ -216,6 +216,123 @@ def train_face_event_classifier(
     return clf, train_acc, X, y, class_counts
 
 
+def collect_visual_face_event_feature_rows(
+    *,
+    cue: Any,
+    info: Any,
+    status: Any,
+    wait_for_space: Callable[[str], None],
+    wait_for_seconds: Callable[[float], None],
+    collect_stream_block: Callable[[float], np.ndarray],
+    jaw_idxs: list[int],
+    jaw_window_n: int,
+    sfreq: float,
+    logger: logging.Logger,
+    n_per_class: int = 5,
+    hold_s: float = 5.0,
+    prep_s: float = 2.5,
+    iti_s: float = 1.5,
+    window_s: float = 0.60,
+    step_s: float = 0.10,
+    edge_trim_s: float = 0.5,
+    include_blinks: bool = False,
+    min_total_samples: int = 12,
+) -> tuple[np.ndarray, np.ndarray, dict[int, int]]:
+    """Collect special-command calibration rows without fitting a classifier."""
+    original_layout = {
+        "cue_pos": cue.pos,
+        "info_pos": info.pos,
+        "status_pos": status.pos,
+        "cue_h": cue.height,
+        "info_h": info.height,
+        "status_h": status.height,
+    }
+    cue.pos = (0.0, 0.26)
+    info.pos = (0.0, 0.10)
+    status.pos = (0.0, -0.06)
+    cue.height = 0.065
+    info.height = 0.052
+    status.height = 0.048
+
+    trim_n = max(0, int(round(float(edge_trim_s) * float(sfreq))))
+    min_samples = int(jaw_window_n) + 2 * trim_n
+    class_map = {
+        REST_CLASS_CODE: ("REST", "Relax face and avoid blinking/movement."),
+        JAW_CLENCH_CLASS_CODE: ("JAW CLENCH", "Clench jaw and hold."),
+    }
+    if include_blinks:
+        class_map[RAPID_BLINK_CLASS_CODE] = ("RAPID EYE BLINKS", "Blink rapidly and repeatedly.")
+
+    cue.text = "Face-event calibration" if include_blinks else "Jaw calibration"
+    info.text = (
+        "We will collect REST, JAW CLENCH, and RAPID EYE BLINK blocks."
+        if include_blinks
+        else "We will collect REST and JAW CLENCH trials."
+    )
+    status.text = "Press SPACE to begin calibration. ESC to quit."
+    wait_for_space(cue.text)
+
+    try:
+        labels = [REST_CLASS_CODE] * int(n_per_class) + [JAW_CLENCH_CLASS_CODE] * int(n_per_class)
+        if include_blinks:
+            labels += [RAPID_BLINK_CLASS_CODE] * int(n_per_class)
+        np.random.default_rng().shuffle(labels)
+
+        calib_blocks: list[np.ndarray] = []
+        calib_labels: list[int] = []
+        for i, y_label in enumerate(labels, start=1):
+            trial_name, instruction = class_map[int(y_label)]
+            cue.text = "Prepare"
+            info.text = f"Next trial: {trial_name}"
+            status.text = f"Calibration {i}/{len(labels)}"
+            wait_for_seconds(float(prep_s))
+
+            cue.text = trial_name
+            info.text = instruction
+            status.text = f"Hold for {float(hold_s):.1f}s"
+            block = collect_stream_block(float(hold_s))
+            if block.shape[1] >= min_samples:
+                calib_blocks.append(block)
+                calib_labels.append(int(y_label))
+            else:
+                logger.warning(
+                    "Skipping short calibration block %d: samples=%d, needed=%d",
+                    i,
+                    int(block.shape[1]),
+                    min_samples,
+                )
+
+            cue.text = "Relax"
+            info.text = "Short break"
+            status.text = ""
+            wait_for_seconds(float(iti_s))
+
+        X_cal, y_cal = prepare_jaw_calibration_features(
+            blocks=calib_blocks,
+            labels=calib_labels,
+            jaw_idxs=jaw_idxs,
+            sfreq=float(sfreq),
+            window_s=float(window_s),
+            step_s=float(step_s),
+            edge_trim_s=float(edge_trim_s),
+        )
+        if X_cal.shape[0] < int(min_total_samples):
+            raise ValueError(
+                "Special-command calibration failed: not enough usable windows. "
+                "Please rerun and reduce extra movement during REST trials."
+            )
+        vals, cnts = np.unique(y_cal, return_counts=True)
+        class_counts = {int(v): int(c) for v, c in zip(vals, cnts)}
+        return X_cal, y_cal, class_counts
+    finally:
+        cue.pos = original_layout["cue_pos"]
+        info.pos = original_layout["info_pos"]
+        status.pos = original_layout["status_pos"]
+        cue.height = original_layout["cue_h"]
+        info.height = original_layout["info_h"]
+        status.height = original_layout["status_h"]
+
+
 def run_visual_face_event_calibration(
     *,
     cue: Any,

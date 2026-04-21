@@ -18,6 +18,7 @@ from config import (
     MICursorTaskConfig,
     StimConfig,
 )
+from bci_runtime import apply_runtime_config_overrides, resolve_runtime_jaw_classifier, resolve_shared_mi_model
 from derick_ml_jawclench import (
     prepare_jaw_calibration_features,
     select_jaw_channel_indices,
@@ -28,7 +29,6 @@ from mental_command_worker import (
     StreamingIIRFilter,
     canonicalize_channel_name,
     resolve_channel_order,
-    train_or_load_shared_mi_model,
 )
 
 
@@ -82,8 +82,9 @@ def clamp(value: float, lo: float, hi: float) -> float:
 
 
 class SubwayRunnerGame:
-    def __init__(self, fname: str):
+    def __init__(self, fname: str, max_games: int | None = None):
         self.fname = fname
+        self.max_games = max_games
         self.logger = _make_task_logger(fname)
 
         self.lsl_cfg = LSLConfig()
@@ -98,6 +99,23 @@ class SubwayRunnerGame:
             reject_peak_to_peak=150.0,
         )
         self.game_cfg = RunnerGameConfig()
+        cfgs = apply_runtime_config_overrides(
+            "subway_runner_task",
+            lsl_cfg=self.lsl_cfg,
+            stim_cfg=self.stim_cfg,
+            label_cfg=self.label_cfg,
+            task_cfg=self.task_cfg,
+            model_cfg=self.model_cfg,
+            eeg_cfg=self.eeg_cfg,
+            game_cfg=self.game_cfg,
+        )
+        self.lsl_cfg = cfgs["lsl_cfg"]
+        self.stim_cfg = cfgs["stim_cfg"]
+        self.label_cfg = cfgs["label_cfg"]
+        self.task_cfg = cfgs["task_cfg"]
+        self.model_cfg = cfgs["model_cfg"]
+        self.eeg_cfg = cfgs["eeg_cfg"]
+        self.game_cfg = cfgs["game_cfg"]
 
         self.stream = StreamLSL(
             bufsize=60.0,
@@ -197,7 +215,7 @@ class SubwayRunnerGame:
             self.task_cfg.window_s,
             self.task_cfg.window_step_s,
         )
-        shared_model = train_or_load_shared_mi_model(
+        shared_model = resolve_shared_mi_model(
             cache_name="mi_shared_lr_model",
             data_dir=self.task_cfg.data_dir,
             edf_glob=self.task_cfg.edf_glob,
@@ -280,6 +298,12 @@ class SubwayRunnerGame:
         return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
 
     def _calibrate_jaw_classifier(self) -> None:
+        runtime_jaw_classifier, runtime_train_acc = resolve_runtime_jaw_classifier(logger=self.logger, min_total_samples=12)
+        if runtime_jaw_classifier is not None:
+            self.jaw_classifier = runtime_jaw_classifier
+            self.logger.info("Using orchestrator-provided jaw calibration (train_acc=%.3f).", float(runtime_train_acc or 0.0))
+            return
+
         self._wait_for_space(
             "Jaw Calibration",
             "Press SPACE to begin.",
@@ -598,7 +622,11 @@ class SubwayRunnerGame:
             "MI left/right changes lane. Jaw clench jumps over low obstacles.",
         )
 
+        games_completed = 0
         while self.running:
+            if self.max_games is not None and games_completed >= int(self.max_games):
+                self.logger.info("Reached max_games=%d; ending task.", int(self.max_games))
+                break
             self._reset_decoder_state()
 
             lane_idx = 0
@@ -716,6 +744,7 @@ class SubwayRunnerGame:
                 int(jump_count),
                 int(self.prediction_count),
             )
+            games_completed += 1
             if not self._show_game_over(score=int(score), survived_s=float(survived_s), jumps=int(jump_count)):
                 break
 
@@ -727,8 +756,8 @@ class SubwayRunnerGame:
         pygame.quit()
 
 
-def run_task(fname: str) -> None:
-    game = SubwayRunnerGame(fname=fname)
+def run_task(fname: str, max_trials: int | None = None) -> None:
+    game = SubwayRunnerGame(fname=fname, max_games=max_trials)
     try:
         game.run()
     except KeyboardInterrupt:

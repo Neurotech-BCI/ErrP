@@ -1,7 +1,7 @@
 # config.py
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -448,3 +448,32 @@ class KnobTaskConfig:
 @dataclass(frozen=True)
 class MentalCommandModelConfig:
     cov_estimator: str = "oas"
+
+
+@dataclass(frozen=True)
+class SharedBCIConfig:
+    participant_name: str = "participant"
+    mi_cache_name: str = "mi_shared_lr_model"
+    jaw_calibration_blocks_per_class: int = 3
+    jaw_calibration_prep_s: float = 2.5
+    jaw_calibration_hold_s: float = 5.0
+    jaw_calibration_trim_s: float = 0.5
+    jaw_calibration_iti_s: float = 1.5
+    jaw_window_s: float = 0.60
+    jaw_window_step_s: float = 0.10
+
+
+@dataclass(frozen=True)
+class OrchestratedTaskSpec:
+    task_name: str
+    repeats: int = 1
+    max_trials: int | None = None
+    task_kwargs: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class BCIOrchestratorConfig:
+    shared: SharedBCIConfig = field(default_factory=SharedBCIConfig)
+    shared_config_overrides: dict[str, dict[str, object]] = field(default_factory=dict)
+    task_config_overrides: dict[str, dict[str, dict[str, object]]] = field(default_factory=dict)
+    task_sequence: tuple[OrchestratedTaskSpec, ...] = field(default_factory=tuple)

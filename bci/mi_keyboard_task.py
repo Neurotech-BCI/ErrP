@@ -18,6 +18,11 @@ from config import (
     MICursorTaskConfig,
     StimConfig,
 )
+from bci_runtime import (
+    apply_runtime_config_overrides,
+    resolve_runtime_jaw_classifier,
+    resolve_shared_mi_model,
+)
 from derick_ml_jawclench import (
     run_visual_jaw_calibration,
     select_jaw_channel_indices,
@@ -27,7 +32,6 @@ from mental_command_worker import (
     StreamingIIRFilter,
     canonicalize_channel_name,
     resolve_channel_order,
-    train_or_load_shared_mi_model,
 )
 
 
@@ -149,6 +153,21 @@ def run_task(
         h_freq=30.0,
         reject_peak_to_peak=150.0,
     )
+    cfgs = apply_runtime_config_overrides(
+        "mi_keyboard_task",
+        lsl_cfg=lsl_cfg,
+        stim_cfg=stim_cfg,
+        label_cfg=label_cfg,
+        task_cfg=task_cfg,
+        model_cfg=model_cfg,
+        eeg_cfg=eeg_cfg,
+    )
+    lsl_cfg = cfgs["lsl_cfg"]
+    stim_cfg = cfgs["stim_cfg"]
+    label_cfg = cfgs["label_cfg"]
+    task_cfg = cfgs["task_cfg"]
+    model_cfg = cfgs["model_cfg"]
+    eeg_cfg = cfgs["eeg_cfg"]
 
     logger.info(
         "Starting MI virtual keyboard | move_conf=%.2f cursor_step_s=%.3f jaw_select_refractory_s=%.2f",
@@ -191,7 +210,7 @@ def run_task(
         task_cfg.window_s,
         task_cfg.window_step_s,
     )
-    shared_model = train_or_load_shared_mi_model(
+    shared_model = resolve_shared_mi_model(
         cache_name="mi_shared_lr_model",
         data_dir=task_cfg.data_dir,
         edf_glob=task_cfg.edf_glob,
@@ -354,27 +373,32 @@ def run_task(
             return np.empty((len(model_ch_names), 0), dtype=np.float32)
         return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
 
-    jaw_classifier, jaw_train_acc, _jaw_y = run_visual_jaw_calibration(
-        cue=cue,
-        info=info,
-        status=status,
-        wait_for_space=_wait_for_space,
-        wait_for_seconds=_wait_for_seconds,
-        collect_stream_block=_collect_stream_block,
-        jaw_idxs=jaw_idxs,
-        jaw_window_n=jaw_window_n,
-        sfreq=sfreq,
-        model_ch_names=model_ch_names,
-        logger=logger,
-        n_per_class=int(task_cfg.jaw_calibration_blocks_per_class),
-        hold_s=float(task_cfg.jaw_calibration_hold_s),
-        prep_s=float(task_cfg.jaw_calibration_prep_s),
-        iti_s=float(task_cfg.jaw_calibration_iti_s),
-        window_s=float(task_cfg.jaw_window_s),
-        step_s=float(task_cfg.jaw_window_step_s),
-        edge_trim_s=float(task_cfg.jaw_calibration_trim_s),
-        min_total_samples=12,
-    )
+    runtime_jaw_classifier, runtime_train_acc = resolve_runtime_jaw_classifier(logger=logger, min_total_samples=12)
+    if runtime_jaw_classifier is not None:
+        jaw_classifier = runtime_jaw_classifier
+        jaw_train_acc = float(runtime_train_acc or 0.0)
+    else:
+        jaw_classifier, jaw_train_acc, _jaw_y = run_visual_jaw_calibration(
+            cue=cue,
+            info=info,
+            status=status,
+            wait_for_space=_wait_for_space,
+            wait_for_seconds=_wait_for_seconds,
+            collect_stream_block=_collect_stream_block,
+            jaw_idxs=jaw_idxs,
+            jaw_window_n=jaw_window_n,
+            sfreq=sfreq,
+            model_ch_names=model_ch_names,
+            logger=logger,
+            n_per_class=int(task_cfg.jaw_calibration_blocks_per_class),
+            hold_s=float(task_cfg.jaw_calibration_hold_s),
+            prep_s=float(task_cfg.jaw_calibration_prep_s),
+            iti_s=float(task_cfg.jaw_calibration_iti_s),
+            window_s=float(task_cfg.jaw_window_s),
+            step_s=float(task_cfg.jaw_window_step_s),
+            edge_trim_s=float(task_cfg.jaw_calibration_trim_s),
+            min_total_samples=12,
+        )
     logger.info("Jaw classifier ready: train_acc=%.3f", float(jaw_train_acc))
 
     cue.text = "Ready"

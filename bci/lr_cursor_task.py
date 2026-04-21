@@ -19,14 +19,10 @@ from config import (
     MICursorTaskConfig,
     StimConfig,
 )
+from bci_runtime import apply_runtime_config_overrides, resolve_shared_mi_model
 from mental_command_worker import (
     StreamingIIRFilter,
-    append_windows_to_dataset,
     canonicalize_channel_name,
-    evaluate_loso_sessions,
-    load_offline_mi_dataset,
-    make_mi_classifier,
-    prepare_continuous_windows,
     resolve_channel_order,
 )
 
@@ -104,7 +100,7 @@ def _sample_target(
     raise RuntimeError("Failed to sample a valid target location.")
 
 
-def run_task(fname: str) -> None:
+def run_task(fname: str, max_trials: int | None = None) -> None:
     logger = _make_task_logger(fname)
     lsl_cfg = LSLConfig()
     stim_cfg = StimConfig()
@@ -117,6 +113,21 @@ def run_task(fname: str) -> None:
         h_freq=30.0,
         reject_peak_to_peak=150.0,
     )
+    cfgs = apply_runtime_config_overrides(
+        "lr_cursor_task",
+        lsl_cfg=lsl_cfg,
+        stim_cfg=stim_cfg,
+        label_cfg=label_cfg,
+        task_cfg=task_cfg,
+        model_cfg=model_cfg,
+        eeg_cfg=eeg_cfg,
+    )
+    lsl_cfg = cfgs["lsl_cfg"]
+    stim_cfg = cfgs["stim_cfg"]
+    label_cfg = cfgs["label_cfg"]
+    task_cfg = cfgs["task_cfg"]
+    model_cfg = cfgs["model_cfg"]
+    eeg_cfg = cfgs["eeg_cfg"]
 
     rng = np.random.default_rng()
 
@@ -273,11 +284,7 @@ def run_task(fname: str) -> None:
         return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
 
     classifier = None
-    dataset = None
     class_index: dict[int, int] | None = None
-    rest_session_id: int | None = None
-    online_cal_session_id: int | None = None
-    train_only_session_ids: set[int] = set()
 
     logger.info(
         "Starting offline model preparation: data_dir=%s, edf_glob=%s, window_s=%.3f, step_s=%.3f, "
@@ -298,187 +305,45 @@ def run_task(fname: str) -> None:
     _draw_frame()
 
     try:
-        dataset = load_offline_mi_dataset(
+        shared_model = resolve_shared_mi_model(
+            cache_name="mi_shared_lr_model",
             data_dir=task_cfg.data_dir,
             edf_glob=task_cfg.edf_glob,
+            calibrate_on_participant=task_cfg.calirate_on_participant,
             eeg_cfg=eeg_cfg,
             task_cfg=task_cfg,
             stim_cfg=stim_cfg,
-            target_sfreq=sfreq,
+            model_cfg=model_cfg,
+            target_sfreq=float(sfreq),
             target_channel_names=model_ch_names,
-            calibrateOnParticipant=task_cfg.calirate_on_participant
+            logger=logger,
         )
-
-        if bool(task_cfg.enable_online_rest_calibration):
-            cue.text = "Rest calibration"
-            info.text = "Keep both hands relaxed in your motor imagery posture and look at the center."
-            status.text = "Press SPACE to begin the REST baseline. ESC to quit."
-            _draw_frame()
-            while True:
-                keys = event.getKeys()
-                if "escape" in keys:
-                    raise KeyboardInterrupt
-                if "space" in keys:
-                    break
-                _draw_frame()
-
-            cue.text = "REST baseline"
-            info.text = f"Relax both hands and keep still for {task_cfg.rest_calibration_duration_s:.0f}s."
-            status.text = ""
-            _draw_frame()
-            rest_block = _collect_stream_block(float(task_cfg.rest_calibration_duration_s))
-            rest_windows = prepare_continuous_windows(
-                raw_block=rest_block,
-                eeg_cfg=eeg_cfg,
-                sfreq=sfreq,
-                window_s=float(task_cfg.window_s),
-                step_s=float(task_cfg.window_step_s),
-                reject_peak_to_peak=eeg_cfg.reject_peak_to_peak,
-            )
-            if rest_windows.shape[0] > 0:
-                rest_session_id = -1
-                train_only_session_ids.add(rest_session_id)
-                rest_labels = np.full(rest_windows.shape[0], int(task_cfg.rest_class_code), dtype=int)
-                dataset = append_windows_to_dataset(dataset, rest_windows, rest_labels, rest_session_id, n_trials_add=1)
-                logger.info(
-                    "Collected online REST calibration: duration_s=%.3f, raw_samples=%d, windows=%d, session_id=%d",
-                    float(task_cfg.rest_calibration_duration_s),
-                    int(rest_block.shape[1]),
-                    int(rest_windows.shape[0]),
-                    rest_session_id,
-                )
-            else:
-                logger.warning("REST calibration produced no usable windows after preprocessing/rejection.")
-
-        if bool(task_cfg.enable_online_lr_calibration):
-            cue.text = "Live LEFT/RIGHT calibration"
-            info.text = "We will collect a few sustained LEFT and RIGHT imagery blocks before the task."
-            status.text = "Press SPACE to begin. ESC to quit."
-            _draw_frame()
-            while True:
-                keys = event.getKeys()
-                if "escape" in keys:
-                    raise KeyboardInterrupt
-                if "space" in keys:
-                    break
-                _draw_frame()
-
-            online_cal_session_id = int(np.max(dataset.session_ids)) + 1
-            cal_codes = (
-                [int(stim_cfg.left_code)] * int(task_cfg.online_lr_calibration_reps_per_class)
-                + [int(stim_cfg.right_code)] * int(task_cfg.online_lr_calibration_reps_per_class)
-            )
-            rng.shuffle(cal_codes)
-            cal_windows: list[np.ndarray] = []
-            cal_labels: list[np.ndarray] = []
-
-            for cal_idx, code in enumerate(cal_codes, start=1):
-                class_name = label_cfg.left_name if int(code) == int(stim_cfg.left_code) else label_cfg.right_name
-                cue.text = "Prepare"
-                info.text = f"Get ready for {class_name} motor imagery."
-                status.text = f"Calibration block {cal_idx}/{len(cal_codes)}"
-                _draw_frame()
-                _wait_for_seconds(float(task_cfg.online_lr_calibration_prep_s))
-
-                cue.text = f"SUSTAIN {class_name}"
-                info.text = f"Hold {class_name} motor imagery for {task_cfg.online_lr_calibration_hold_s:.0f}s."
-                status.text = ""
-                _draw_frame()
-                cal_block = _collect_stream_block(float(task_cfg.online_lr_calibration_hold_s))
-                windows = prepare_continuous_windows(
-                    raw_block=cal_block,
-                    eeg_cfg=eeg_cfg,
-                    sfreq=sfreq,
-                    window_s=float(task_cfg.window_s),
-                    step_s=float(task_cfg.window_step_s),
-                    reject_peak_to_peak=eeg_cfg.reject_peak_to_peak,
-                )
-                if windows.shape[0] > 0:
-                    cal_windows.append(windows)
-                    cal_labels.append(np.full(windows.shape[0], int(code), dtype=int))
-                logger.info(
-                    "Collected live LR calibration block: idx=%d, code=%d, raw_samples=%d, windows=%d",
-                    cal_idx,
-                    int(code),
-                    int(cal_block.shape[1]),
-                    int(windows.shape[0]),
-                )
-
-                cue.text = ""
-                info.text = "Relax"
-                status.text = ""
-                _draw_frame()
-                _wait_for_seconds(float(task_cfg.online_lr_calibration_iti_s))
-
-            if cal_windows:
-                X_online = np.concatenate(cal_windows, axis=0).astype(np.float32, copy=False)
-                y_online = np.concatenate(cal_labels, axis=0).astype(int, copy=False)
-                dataset = append_windows_to_dataset(
-                    dataset=dataset,
-                    windows=X_online,
-                    labels=y_online,
-                    session_id=online_cal_session_id,
-                    n_trials_add=len(cal_codes),
-                )
-                logger.info(
-                    "Added live LEFT/RIGHT calibration session: session_id=%d, windows=%d, trials=%d",
-                    online_cal_session_id,
-                    int(X_online.shape[0]),
-                    len(cal_codes),
-                )
-            else:
-                logger.warning("Live LEFT/RIGHT calibration produced no usable windows after preprocessing/rejection.")
-
-        classes_present = {int(c) for c in np.unique(dataset.y)}
-        expected_classes = {int(stim_cfg.left_code), int(stim_cfg.right_code)}
-        if bool(task_cfg.enable_online_rest_calibration) and rest_session_id is not None:
-            expected_classes.add(int(task_cfg.rest_class_code))
-        missing_classes = expected_classes.difference(classes_present)
-        if missing_classes:
-            raise RuntimeError(
-                f"Training data are missing required classes. Found {sorted(classes_present)}, "
-                f"expected at least {sorted(expected_classes)}."
-            )
-
-        loso = evaluate_loso_sessions(dataset, model_cfg, train_only_session_ids=train_only_session_ids)
-        classifier = make_mi_classifier(model_cfg)
-        classifier.fit(dataset.X, dataset.y)
+        classifier = shared_model.classifier
+        class_index = shared_model.class_index
+        loso = shared_model.loso
         classifier_classes = np.asarray(classifier.named_steps["clf"].classes_, dtype=int)
-        class_index = {int(c): i for i, c in enumerate(classifier_classes)}
         if int(stim_cfg.left_code) not in class_index or int(stim_cfg.right_code) not in class_index:
             raise RuntimeError(
                 f"Classifier classes {classifier_classes.tolist()} do not contain the expected "
                 f"left/right codes {[int(stim_cfg.left_code), int(stim_cfg.right_code)]}."
             )
-        counts = Counter(dataset.y.tolist())
+        counts = Counter(shared_model.class_counts)
         logger.info(
-            "Offline dataset ready: files_used=%d/%d, trials=%d, windows=%d, class_counts=%s, "
-            "loso_mean=%.4f, loso_std=%.4f, eeg_units=%s, offline_scale_applied=%.3f, "
-            "train_only_session_ids=%s, online_cal_session_id=%s",
-            dataset.n_files_used,
-            dataset.n_files_found,
-            dataset.n_trials,
-            dataset.n_windows,
+            "Shared MI model ready: class_counts=%s, loso_mean=%.4f, loso_std=%.4f, cache=%s",
             counts,
             loso.mean_accuracy,
             loso.std_accuracy,
-            dataset.eeg_units,
-            dataset.offline_scale_applied,
-            sorted(train_only_session_ids),
-            online_cal_session_id,
+            shared_model.cache_path,
         )
-        np.save(f"{fname}_lr_cursor_windows.npy", dataset.X)
-        np.save(f"{fname}_lr_cursor_labels.npy", dataset.y)
+        if shared_model.dataset is not None:
+            np.save(f"{fname}_lr_cursor_windows.npy", shared_model.dataset.X)
+            np.save(f"{fname}_lr_cursor_labels.npy", shared_model.dataset.y)
         with open(f"{fname}_lr_cursor_model.pkl", "wb") as fh:
             pickle.dump(classifier, fh)
 
         session_lines = []
         for session_id, score in sorted(loso.session_scores.items()):
-            if online_cal_session_id is not None and int(session_id) == int(online_cal_session_id):
-                session_lines.append(f"OnlineCal: {score:.3f}")
-            else:
-                session_lines.append(f"S{session_id}: {score:.3f}")
-        counts = Counter(dataset.y.tolist())
+            session_lines.append(f"S{session_id}: {score:.3f}")
         rest_count_text = ""
         if int(task_cfg.rest_class_code) in counts:
             rest_count_text = f"  {label_cfg.rest_name}: {counts[int(task_cfg.rest_class_code)]}"
@@ -681,6 +546,9 @@ def run_task(fname: str) -> None:
 
     try:
         while True:
+            if max_trials is not None and completed_trials >= int(max_trials):
+                logger.info("Reached max_trials=%d; ending task.", int(max_trials))
+                break
             _reset_trial_state()
             target.fillColor = target_color
             target_pos = _sample_target(
