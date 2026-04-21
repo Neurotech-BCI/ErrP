@@ -37,12 +37,17 @@ class RunnerGameConfig:
     target_fps: int = 120
     lane_move_cooldown_s: float = 0.30
     jump_duration_s: float = 0.65
-    jump_height: float = 0.22
+    jump_height: float = 0.30
     jump_retrigger_cooldown_s: float = 0.50
     move_confidence_thresh: float = 0.58
-    base_world_speed: float = 0.50
-    spawn_interval_start_s: float = 0.92
-    spawn_interval_end_s: float = 0.34
+    base_world_speed: float = 0.42
+    cluster_start_depth: float = 0.05
+    low_obstacle_depth_offset: float = 0.14
+    post_cluster_gap_s: float = 0.60
+    open_lane_low_obstacle_prob: float = 0.45
+    collision_depth: float = 0.93
+    collision_window: float = 0.06
+    low_obstacle_jump_clearance: float = 0.10
 
 
 def _make_task_logger(fname: str) -> logging.Logger:
@@ -443,13 +448,17 @@ class SubwayRunnerGame:
         blocked_side = self.rng.choice((-1, 1))
         open_lane = -blocked_side
 
-        # Depth `y` runs from horizon (0.0) to player row (1.0). Spawn clusters
-        # near the horizon so they travel toward the player over time.
-        obstacles.append({"lane": 0, "y": 0.05, "kind": "high"})
-        obstacles.append({"lane": int(blocked_side), "y": 0.05, "kind": "high"})
+        start_depth = float(self.game_cfg.cluster_start_depth)
+        obstacles.append({"lane": 0, "y": start_depth, "kind": "high", "cleared": False})
+        obstacles.append({"lane": int(blocked_side), "y": start_depth, "kind": "high", "cleared": False})
 
-        if self.rng.random() < 0.55:
-            obstacles.append({"lane": int(open_lane), "y": 0.19, "kind": "low"})
+        if self.rng.random() < float(self.game_cfg.open_lane_low_obstacle_prob):
+            obstacles.append({
+                "lane": int(open_lane),
+                "y": start_depth + float(self.game_cfg.low_obstacle_depth_offset),
+                "kind": "low",
+                "cleared": False,
+            })
 
     def _reset_decoder_state(self) -> None:
         self.live_filter.reset()
@@ -639,7 +648,7 @@ class SubwayRunnerGame:
             jump_count = 0
 
             obstacles: list[dict] = []
-            spawn_timer = 0.65
+            next_cluster_ready_t = game_start + 0.85
             score = 0
             passed = 0
             game_over = False
@@ -686,14 +695,9 @@ class SubwayRunnerGame:
                 speed_mult = 1.0 + 0.35 * min(1.5, elapsed / 60.0)
                 world_speed = float(self.game_cfg.base_world_speed) * speed_mult
 
-                spawn_interval = max(
-                    float(self.game_cfg.spawn_interval_end_s),
-                    float(self.game_cfg.spawn_interval_start_s) - 0.30 * min(1.0, elapsed / 75.0),
-                )
-                spawn_timer -= dt
-                if spawn_timer <= 0.0:
+                if (not obstacles) and now_t >= next_cluster_ready_t:
                     self._spawn_cluster(obstacles)
-                    spawn_timer = spawn_interval + self.rng.uniform(-0.12, 0.12)
+                    next_cluster_ready_t = float("inf")
 
                 remove_count = 0
                 for ob in obstacles:
@@ -703,20 +707,25 @@ class SubwayRunnerGame:
                     remove_count += 1
                 if remove_count > 0:
                     passed += remove_count
+                if not obstacles and next_cluster_ready_t == float("inf"):
+                    next_cluster_ready_t = now_t + float(self.game_cfg.post_cluster_gap_s)
 
                 score = int(elapsed * 12.0 + passed * 8)
 
                 for ob in obstacles:
+                    if bool(ob.get("cleared", False)):
+                        continue
                     if int(ob["lane"]) != lane_idx:
                         continue
-                    if abs(float(ob["y"]) - 1.0) > 0.085:
+                    if abs(float(ob["y"]) - float(self.game_cfg.collision_depth)) > float(self.game_cfg.collision_window):
                         continue
 
                     kind = str(ob["kind"])
                     if kind == "low":
-                        if jump_offset < 0.08:
+                        if jump_offset < float(self.game_cfg.low_obstacle_jump_clearance):
                             game_over = True
                             break
+                        ob["cleared"] = True
                     else:
                         game_over = True
                         break
