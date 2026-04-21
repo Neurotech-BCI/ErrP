@@ -148,6 +148,7 @@ class TetrisBoard:
         self.lines = 0
         self.level = 1
         self.game_over = False
+        self.pieces_locked = 0
 
         self._bag: list[str] = []
         self.current_type: str = ""
@@ -156,7 +157,7 @@ class TetrisBoard:
         self.current_col: int = 0
         self.next_type: str = ""
 
-        self._spawn_next()
+        self.next_type = self._next_piece()
         self._spawn_next()
 
     def _refill_bag(self) -> None:
@@ -221,6 +222,7 @@ class TetrisBoard:
         for r, c in self._cells(self.current_row, self.current_col, self.current_rot):
             if 0 <= r < self.rows and 0 <= c < self.cols:
                 self.grid[r][c] = self.current_type
+        self.pieces_locked += 1
         cleared = self._clear_lines()
         self.lines += cleared
         self.score += [0, 100, 300, 500, 800][min(cleared, 4)] * self.level
@@ -772,15 +774,21 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
             last_move_t = now
         return moved
 
-    def _show_game_over(board: TetrisBoard) -> bool:
+    def _show_game_over(board: TetrisBoard, *, piece_limit_reached: bool = False) -> bool:
+        body = (
+            f"PIECE LIMIT REACHED\n\n"
+            f"Score: {board.score}\n"
+            f"Lines: {board.lines}  Level: {board.level}\n"
+            f"Pieces: {board.pieces_locked}"
+        ) if piece_limit_reached else (
+            f"GAME OVER\n\n"
+            f"Score: {board.score}\n"
+            f"Lines: {board.lines}  Level: {board.level}\n"
+            f"Pieces: {board.pieces_locked}"
+        )
         go_txt = visual.TextStim(
             win,
-            text=(
-                f"GAME OVER\n\n"
-                f"Score: {board.score}\n"
-                f"Lines: {board.lines}  Level: {board.level}\n\n"
-                "SPACE to play again   ESC to quit"
-            ),
+            text=(body + "\n\nSPACE to play again   ESC to quit"),
             pos=(0, 0),
             height=0.08,
             color=(0.95, 0.25, 0.25),
@@ -795,15 +803,19 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
             if "space" in keys:
                 return True
 
+    max_pieces = int(max_trials) if max_trials is not None else None
+    total_pieces_locked = 0
     session_stats: list[dict] = []
 
     try:
         while True:
-            if max_trials is not None and len(session_stats) >= int(max_trials):
-                logger.info("Reached max_trials=%d; ending task.", int(max_trials))
+            if max_pieces is not None and total_pieces_locked >= max_pieces:
+                logger.info("Reached max_trials=%d piece limit; ending task.", int(max_pieces))
                 break
             board = TetrisBoard()
             drop_clock = core.Clock()
+            piece_limit_reached = False
+            game_start_pieces = total_pieces_locked
 
             live_filter.reset()
             live_buffer = np.empty((len(model_ch_names), 0), np.float32)
@@ -854,9 +866,28 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
                     parts.extend([f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", live_note])
                     txt_bci.text = "   ".join(parts)
                     txt_cue.text = "LEFT/RIGHT imagery → move  |  Jaw clench → rotate"
-                    txt_status.text = f"Predictions: {prediction_count}   jaw_p={jaw_prob:.2f}"
+                    session_pieces_locked = game_start_pieces + board.pieces_locked
+                    if max_pieces is None:
+                        txt_status.text = (
+                            f"Predictions: {prediction_count}   jaw_p={jaw_prob:.2f}   "
+                            f"pieces={session_pieces_locked}"
+                        )
+                    else:
+                        txt_status.text = (
+                            f"Predictions: {prediction_count}   jaw_p={jaw_prob:.2f}   "
+                            f"pieces={session_pieces_locked}/{max_pieces}"
+                        )
 
                     _draw_frame(board)
+
+                    if max_pieces is not None and session_pieces_locked >= max_pieces:
+                        piece_limit_reached = True
+                        logger.info(
+                            "Reached piece limit: session_pieces_locked=%d max_trials=%d",
+                            int(session_pieces_locked),
+                            int(max_pieces),
+                        )
+                        break
 
             except KeyboardInterrupt:
                 logger.info("Game interrupted by user.")
@@ -864,19 +895,32 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
                     "score": board.score,
                     "lines": board.lines,
                     "level": board.level,
+                    "pieces_locked": board.pieces_locked,
+                    "session_pieces_locked": game_start_pieces + board.pieces_locked,
                     "predictions": prediction_count,
                 })
                 break
 
+            total_pieces_locked = game_start_pieces + board.pieces_locked
             session_stats.append({
                 "score": board.score,
                 "lines": board.lines,
                 "level": board.level,
+                "pieces_locked": board.pieces_locked,
+                "session_pieces_locked": total_pieces_locked,
                 "predictions": prediction_count,
             })
-            logger.info("Game over: score=%d, lines=%d, level=%d", board.score, board.lines, board.level)
+            logger.info(
+                "%s: score=%d, lines=%d, level=%d, pieces_locked=%d, session_pieces_locked=%d",
+                "Piece limit reached" if piece_limit_reached else "Game over",
+                board.score,
+                board.lines,
+                board.level,
+                board.pieces_locked,
+                total_pieces_locked,
+            )
 
-            if not _show_game_over(board):
+            if not _show_game_over(board, piece_limit_reached=piece_limit_reached):
                 break
 
     finally:
