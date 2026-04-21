@@ -3,12 +3,12 @@ from __future__ import annotations
 import logging
 import pickle
 import random
-from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 
 import numpy as np
+import pygame
 from mne_lsl.stream import StreamLSL
-from psychopy import core, event, visual
 
 from config import (
     EEGConfig,
@@ -18,13 +18,31 @@ from config import (
     MICursorTaskConfig,
     StimConfig,
 )
-from jaw_clench_detector import JawClenchDetector
+from derick_ml_jawclench import (
+    prepare_jaw_calibration_features,
+    select_jaw_channel_indices,
+    train_jaw_clench_classifier,
+    update_live_jaw_clench_state,
+)
 from mental_command_worker import (
     StreamingIIRFilter,
     canonicalize_channel_name,
     resolve_channel_order,
     train_or_load_shared_mi_model,
 )
+
+
+@dataclass(frozen=True)
+class RunnerGameConfig:
+    target_fps: int = 120
+    lane_move_cooldown_s: float = 0.30
+    jump_duration_s: float = 0.65
+    jump_height: float = 0.22
+    jump_retrigger_cooldown_s: float = 0.50
+    move_confidence_thresh: float = 0.58
+    base_world_speed: float = 0.50
+    spawn_interval_start_s: float = 0.92
+    spawn_interval_end_s: float = 0.34
 
 
 def _make_task_logger(fname: str) -> logging.Logger:
@@ -59,458 +77,531 @@ def _prompt_prefix() -> str:
         print("Name cannot be empty.")
 
 
-def run_task(fname: str) -> None:  # noqa: C901
-    logger = _make_task_logger(fname)
+def clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
 
-    lsl_cfg = LSLConfig()
-    stim_cfg = StimConfig()
-    label_cfg = MentalCommandLabelConfig()
-    task_cfg = MICursorTaskConfig()
-    model_cfg = MentalCommandModelConfig()
-    eeg_cfg = EEGConfig(
-        picks=("Pz", "F4", "C4", "P4", "P3", "C3", "F3"),
-        l_freq=8.0,
-        h_freq=30.0,
-        reject_peak_to_peak=150.0,
-    )
 
-    # ---------------------------------------------------------------
-    # Stream setup
-    # ---------------------------------------------------------------
-    stream = StreamLSL(
-        bufsize=60.0,
-        name=lsl_cfg.name,
-        stype=lsl_cfg.stype,
-        source_id=lsl_cfg.source_id,
-    )
-    stream.connect(acquisition_delay=0.001, processing_flags="all")
-    logger.info("Connected: %s", stream.info)
+class SubwayRunnerGame:
+    def __init__(self, fname: str):
+        self.fname = fname
+        self.logger = _make_task_logger(fname)
 
-    available = list(stream.info["ch_names"])
-    model_ch_names, missing = resolve_channel_order(available, eeg_cfg.picks)
-    if len(model_ch_names) < 2:
-        event_key = canonicalize_channel_name(lsl_cfg.event_channels)
-        model_ch_names = [ch for ch in available if canonicalize_channel_name(ch) != event_key]
-    if len(model_ch_names) < 2:
-        raise RuntimeError(f"Need >=2 EEG channels, found: {available}")
+        self.lsl_cfg = LSLConfig()
+        self.stim_cfg = StimConfig()
+        self.label_cfg = MentalCommandLabelConfig()
+        self.task_cfg = MICursorTaskConfig()
+        self.model_cfg = MentalCommandModelConfig()
+        self.eeg_cfg = EEGConfig(
+            picks=("Pz", "F4", "C4", "P4", "P3", "C3", "F3"),
+            l_freq=8.0,
+            h_freq=30.0,
+            reject_peak_to_peak=150.0,
+        )
+        self.game_cfg = RunnerGameConfig()
 
-    stream.pick(model_ch_names)
-    sfreq = float(stream.info["sfreq"])
-    stream_ch_names = list(stream.info["ch_names"])
-    logger.info("Channels: sfreq=%.1f  selected=%s  missing=%s", sfreq, stream_ch_names, missing)
+        self.stream = StreamLSL(
+            bufsize=60.0,
+            name=self.lsl_cfg.name,
+            stype=self.lsl_cfg.stype,
+            source_id=self.lsl_cfg.source_id,
+        )
+        self.stream.connect(acquisition_delay=0.001, processing_flags="all")
+        self.logger.info("Connected: %s", self.stream.info)
 
-    jaw_ch_idx = len(model_ch_names) - 1
-    jaw_detector = JawClenchDetector(fs=sfreq)
-    jaw_detector.refractory = 0.70
-    jaw_thresh_min = 8.0
-    jaw_calibration_duration_s = 5.0
+        available = list(self.stream.info["ch_names"])
+        self.model_ch_names, missing = resolve_channel_order(available, self.eeg_cfg.picks)
+        if len(self.model_ch_names) < 2:
+            event_key = canonicalize_channel_name(self.lsl_cfg.event_channels)
+            self.model_ch_names = [ch for ch in available if canonicalize_channel_name(ch) != event_key]
+        if len(self.model_ch_names) < 2:
+            raise RuntimeError(f"Need >=2 EEG channels, found: {available}")
 
-    # ---------------------------------------------------------------
-    # Window and scene
-    # ---------------------------------------------------------------
-    win = visual.Window(
-        size=task_cfg.win_size,
-        color=(0.10, 0.10, 0.12),
-        units="norm",
-        fullscr=task_cfg.fullscreen,
-    )
+        self.stream.pick(self.model_ch_names)
+        self.sfreq = float(self.stream.info["sfreq"])
+        self.logger.info(
+            "Channels: sfreq=%.1f selected=%s missing=%s",
+            self.sfreq,
+            list(self.stream.info["ch_names"]),
+            missing,
+        )
 
-    road_top_y = 0.95
-    road_bottom_y = -0.95
-    road_half_top = 0.42
-    road_half_bottom = 0.78
+        self._prepare_models()
 
-    road = visual.ShapeStim(
-        win,
-        vertices=[(-road_half_bottom, road_bottom_y), (road_half_bottom, road_bottom_y), (road_half_top, road_top_y), (-road_half_top, road_top_y)],
-        closeShape=True,
-        fillColor=(0.18, 0.18, 0.20),
-        lineColor=(0.26, 0.26, 0.30),
-        lineWidth=2,
-    )
-    lane_div_bottom = road_half_bottom / 3.0
-    lane_div_top = road_half_top / 3.0
-    lane_line_l = visual.Line(
-        win,
-        start=(-lane_div_bottom, road_bottom_y),
-        end=(-lane_div_top, road_top_y),
-        lineColor=(0.35, 0.35, 0.40),
-        lineWidth=2,
-    )
-    lane_line_r = visual.Line(
-        win,
-        start=(lane_div_bottom, road_bottom_y),
-        end=(lane_div_top, road_top_y),
-        lineColor=(0.35, 0.35, 0.40),
-        lineWidth=2,
-    )
+        pygame.init()
+        pygame.font.init()
+        flags = pygame.DOUBLEBUF
+        if bool(self.task_cfg.fullscreen):
+            flags |= pygame.FULLSCREEN
+        try:
+            self.screen = pygame.display.set_mode(self.task_cfg.win_size, flags, vsync=1)
+        except TypeError:
+            self.screen = pygame.display.set_mode(self.task_cfg.win_size, flags)
+        pygame.display.set_caption("BCI Subway Runner")
+        self.clock = pygame.time.Clock()
 
-    # Pre-allocate obstacle rects for speed.
-    MAX_OBS = 20
-    obs_rects = [
-        visual.Rect(win, width=0.20, height=0.10, pos=(0, 0), fillColor=(0.92, 0.42, 0.18), lineColor=None)
-        for _ in range(MAX_OBS)
-    ]
+        self.width, self.height = self.task_cfg.win_size
+        self.horizon_y = 150
+        self.bottom_y = self.height - 60
+        self.road_half_top = 150
+        self.road_half_bottom = 530
+        self.player_y = self.height - 165
 
-    player_body = visual.Circle(win, radius=0.055, fillColor=(0.35, 0.85, 0.98), lineColor=(0.92, 0.92, 0.92), lineWidth=2)
-    jump_glow = visual.Circle(win, radius=0.075, fillColor=(0.25, 0.45, 0.95), lineColor=None, opacity=0.0)
+        self.font_title = pygame.font.SysFont("arial", 36, bold=True)
+        self.font_hud = pygame.font.SysFont("arial", 22, bold=True)
+        self.font_overlay = pygame.font.SysFont("arial", 24)
 
-    txt_title = visual.TextStim(win, text="BCI Subway Runner", pos=(0, 0.93), height=0.055, color=(0.93, 0.93, 0.93))
-    txt_score = visual.TextStim(win, text="", pos=(0.74, 0.82), height=0.045, color=(0.95, 0.95, 0.95), anchorHoriz="center")
-    txt_speed = visual.TextStim(win, text="", pos=(0.74, 0.72), height=0.040, color=(0.76, 0.76, 0.76), anchorHoriz="center")
-    txt_cue = visual.TextStim(win, text="", pos=(0, 0.83), height=0.045, color=(0.93, 0.93, 0.93), anchorHoriz="center")
-    txt_info = visual.TextStim(win, text="", pos=(0, -0.78), height=0.035, color=(0.56, 0.82, 1.00), anchorHoriz="center")
-    txt_status = visual.TextStim(win, text="", pos=(0, -0.88), height=0.034, color=(0.78, 0.78, 0.78), anchorHoriz="center")
+        self.running = True
+        self.score = 0
+        self.last_live_ts: float | None = None
 
-    player_base_y = -0.74
+        self.live_filter = StreamingIIRFilter.from_eeg_config(
+            eeg_cfg=self.eeg_cfg,
+            sfreq=self.sfreq,
+            n_channels=len(self.model_ch_names),
+        )
+        self.keep_n = int(round((self.task_cfg.window_s + self.task_cfg.filter_context_s) * self.sfreq))
+        self.window_n = int(round(self.task_cfg.window_s * self.sfreq))
+        self.stream_pull_s = max(0.10, self.task_cfg.live_update_interval_s * 2.0)
 
-    def road_half_width(y_pos: float) -> float:
-        y = float(np.clip(y_pos, road_bottom_y, road_top_y))
-        return float(np.interp(y, [road_bottom_y, road_top_y], [road_half_bottom, road_half_top]))
+        self.live_buffer = np.empty((len(self.model_ch_names), 0), dtype=np.float32)
+        self.jaw_buffer = np.empty((len(self.model_ch_names), 0), dtype=np.float32)
 
-    def lane_to_x(lane_idx: int, y_pos: float) -> float:
-        # Lane centers are at +/- 2/3 of half-width for a 3-lane road.
-        lane_unit = int(lane_idx) - 1
-        return lane_unit * (2.0 / 3.0) * road_half_width(y_pos)
+        self.pred_clock = pygame.time.Clock()
+        self.pred_elapsed_s = 0.0
+        self.prediction_count = 0
+        self.left_prob = 0.5
+        self.right_prob = 0.5
+        self.raw_command = 0.0
+        self.ema_command = 0.0
+        self.live_note = "warming up"
+        self.latest_pred_code: int | None = None
+        self.bias_offset = float(self.task_cfg.live_bias_offset) if bool(self.task_cfg.enable_live_bias_offset) else 0.0
 
-    def _draw_wait_screen(cue: str, status: str, info: str = "") -> None:
-        road.draw()
-        lane_line_l.draw()
-        lane_line_r.draw()
-        txt_title.draw()
-        txt_score.text = "Score\n0"
-        txt_speed.text = "Speed\n1.00x"
-        txt_cue.text = cue
-        txt_info.text = info
-        txt_status.text = status
-        txt_score.draw()
-        txt_speed.draw()
-        txt_cue.draw()
-        txt_info.draw()
-        txt_status.draw()
-        win.flip()
+        self.jaw_prob = 0.0
+        self.jaw_prev_pred = 0
+        self.jaw_event_pending = False
+        self.jaw_last_event_t = -1e9
+        self.jaw_prob_thresh = float(self.task_cfg.jaw_clench_prob_thresh)
+        self.jaw_refractory_s = max(
+            float(self.task_cfg.jaw_clench_refractory_s),
+            float(self.game_cfg.jump_retrigger_cooldown_s),
+        )
+
+        self.rng = random.Random(42)
+
+    def _prepare_models(self) -> None:
+        self.logger.info(
+            "Preparing MI model: data_dir=%s edf_glob=%s window_s=%.2f step_s=%.2f",
+            self.task_cfg.data_dir,
+            self.task_cfg.edf_glob,
+            self.task_cfg.window_s,
+            self.task_cfg.window_step_s,
+        )
+        shared_model = train_or_load_shared_mi_model(
+            cache_name="mi_shared_lr_model",
+            data_dir=self.task_cfg.data_dir,
+            edf_glob=self.task_cfg.edf_glob,
+            calibrate_on_participant=self.task_cfg.calirate_on_participant,
+            eeg_cfg=self.eeg_cfg,
+            task_cfg=self.task_cfg,
+            stim_cfg=self.stim_cfg,
+            model_cfg=self.model_cfg,
+            target_sfreq=float(self.sfreq),
+            target_channel_names=self.model_ch_names,
+            logger=self.logger,
+        )
+        self.classifier = shared_model.classifier
+        self.class_index = shared_model.class_index
+
+        classes = np.asarray(self.classifier.named_steps["clf"].classes_, dtype=int)
+        if int(self.stim_cfg.left_code) not in self.class_index or int(self.stim_cfg.right_code) not in self.class_index:
+            raise RuntimeError(
+                f"Classifier classes {classes.tolist()} do not contain left/right codes "
+                f"{[int(self.stim_cfg.left_code), int(self.stim_cfg.right_code)]}."
+            )
+
+        with open(f"{self.fname}_subway_runner_model.pkl", "wb") as fh:
+            pickle.dump(self.classifier, fh)
+
+        self.jaw_idxs = select_jaw_channel_indices(self.model_ch_names)
+        self.jaw_window_n = int(round(float(self.task_cfg.jaw_window_s) * self.sfreq))
+        self._calibrate_jaw_classifier()
+
+    def _poll_quit(self) -> bool:
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                return True
+            if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+                return True
+        return False
+
+    def _draw_wait_screen(self, cue: str, status: str, info: str = "") -> None:
+        self.screen.fill((12, 18, 26))
+        self._draw_road()
+        self._draw_text(cue, self.font_title, (236, 242, 247), self.width // 2, 110, "midtop")
+        self._draw_text(status, self.font_overlay, (212, 225, 234), self.width // 2, self.height - 150, "midtop")
+        if info:
+            self._draw_text(info, self.font_overlay, (148, 209, 236), self.width // 2, self.height - 110, "midtop")
+        pygame.display.flip()
+
+    def _wait_for_space(self, cue: str, status: str, info: str = "") -> None:
+        while self.running:
+            if self._poll_quit():
+                raise KeyboardInterrupt
+            pressed = pygame.key.get_pressed()
+            if pressed[pygame.K_SPACE]:
+                return
+            self._draw_wait_screen(cue, status, info)
+            self.clock.tick(self.game_cfg.target_fps)
+
+    def _collect_stream_block(self, duration_s: float, cue: str, info_text: str) -> np.ndarray:
+        chunks: list[np.ndarray] = []
+        last_ts_local: float | None = None
+        start = pygame.time.get_ticks() / 1000.0
+
+        while (pygame.time.get_ticks() / 1000.0) - start < duration_s:
+            if self._poll_quit():
+                raise KeyboardInterrupt
+
+            data, ts = self.stream.get_data(winsize=min(0.20, duration_s), picks="all")
+            if data.size > 0 and ts is not None and len(ts) > 0:
+                ts_arr = np.asarray(ts)
+                mask = np.ones_like(ts_arr, dtype=bool) if last_ts_local is None else (ts_arr > float(last_ts_local))
+                if np.any(mask):
+                    chunks.append(np.asarray(data[:, mask], dtype=np.float32))
+                    last_ts_local = float(ts_arr[mask][-1])
+
+            elapsed = (pygame.time.get_ticks() / 1000.0) - start
+            self._draw_wait_screen(cue, f"{max(0.0, duration_s - elapsed):0.1f}s", info_text)
+            self.clock.tick(self.game_cfg.target_fps)
+
+        if not chunks:
+            return np.empty((len(self.model_ch_names), 0), dtype=np.float32)
+        return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
+
+    def _calibrate_jaw_classifier(self) -> None:
+        self._wait_for_space(
+            "Jaw Calibration",
+            "Press SPACE to begin.",
+            "Collecting REST and JAW CLENCH blocks for jump detection.",
+        )
+
+        n_per_class = int(self.task_cfg.jaw_calibration_blocks_per_class)
+        hold_s = float(self.task_cfg.jaw_calibration_hold_s)
+        prep_s = float(self.task_cfg.jaw_calibration_prep_s)
+        iti_s = float(self.task_cfg.jaw_calibration_iti_s)
+        trim_s = float(self.task_cfg.jaw_calibration_trim_s)
+        min_samples = self.jaw_window_n + 2 * int(round(trim_s * self.sfreq))
+
+        labels = [0] * n_per_class + [1] * n_per_class
+        random.shuffle(labels)
+        calib_blocks: list[np.ndarray] = []
+        calib_labels: list[int] = []
+
+        for i, y_label in enumerate(labels, start=1):
+            is_clench = bool(y_label == 1)
+            trial_name = "JAW CLENCH" if is_clench else "REST"
+
+            prep_start = pygame.time.get_ticks() / 1000.0
+            while (pygame.time.get_ticks() / 1000.0) - prep_start < prep_s:
+                if self._poll_quit():
+                    raise KeyboardInterrupt
+                remaining = prep_s - ((pygame.time.get_ticks() / 1000.0) - prep_start)
+                self._draw_wait_screen("Prepare", f"{remaining:0.1f}s", f"Next: {trial_name} ({i}/{len(labels)})")
+                self.clock.tick(self.game_cfg.target_fps)
+
+            info = "Clench jaw and hold." if is_clench else "Relax face and avoid movement."
+            block = self._collect_stream_block(hold_s, trial_name, info)
+            if block.shape[1] >= min_samples:
+                calib_blocks.append(block)
+                calib_labels.append(int(y_label))
+            else:
+                self.logger.warning(
+                    "Skipping short jaw calibration block %d: samples=%d needed=%d",
+                    i,
+                    int(block.shape[1]),
+                    min_samples,
+                )
+
+            iti_start = pygame.time.get_ticks() / 1000.0
+            while (pygame.time.get_ticks() / 1000.0) - iti_start < iti_s:
+                if self._poll_quit():
+                    raise KeyboardInterrupt
+                remaining = iti_s - ((pygame.time.get_ticks() / 1000.0) - iti_start)
+                self._draw_wait_screen("Relax", f"{remaining:0.1f}s", "Short break")
+                self.clock.tick(self.game_cfg.target_fps)
+
+        X_np, y_np = prepare_jaw_calibration_features(
+            blocks=calib_blocks,
+            labels=calib_labels,
+            jaw_idxs=self.jaw_idxs,
+            sfreq=float(self.sfreq),
+            window_s=float(self.task_cfg.jaw_window_s),
+            step_s=float(self.task_cfg.jaw_window_step_s),
+            edge_trim_s=float(self.task_cfg.jaw_calibration_trim_s),
+        )
+        self.jaw_classifier, train_acc, _X_np, y_np = train_jaw_clench_classifier(
+            feature_rows=X_np,
+            labels=y_np,
+            min_total_samples=12,
+        )
+        self.logger.info(
+            "Jaw calibration ready: windows=%d rest=%d clench=%d train_acc=%.3f",
+            int(len(y_np)),
+            int(np.sum(y_np == 0)),
+            int(np.sum(y_np == 1)),
+            float(train_acc),
+        )
+
+        self._wait_for_space(
+            "Calibration Complete",
+            "Press SPACE to start running.",
+            f"Jaw train acc {float(train_acc):.2f}",
+        )
+
+    def _road_bounds(self, depth: float) -> tuple[float, float, float]:
+        d = clamp(depth, 0.0, 1.0)
+        y = self.horizon_y + (self.bottom_y - self.horizon_y) * d
+        hw = self.road_half_top + (self.road_half_bottom - self.road_half_top) * d
+        return self.width / 2, y, hw
+
+    def _lane_screen_x(self, lane: int, depth: float) -> float:
+        center, _, hw = self._road_bounds(depth)
+        return center + float(lane) * hw * 0.62
+
+    def _draw_road(self) -> None:
+        center = self.width / 2
+        top_left = (center - self.road_half_top, self.horizon_y)
+        top_right = (center + self.road_half_top, self.horizon_y)
+        bottom_right = (center + self.road_half_bottom, self.bottom_y)
+        bottom_left = (center - self.road_half_bottom, self.bottom_y)
+
+        pygame.draw.polygon(self.screen, (29, 34, 40), [top_left, top_right, bottom_right, bottom_left])
+        pygame.draw.lines(self.screen, (84, 97, 107), True, [top_left, top_right, bottom_right, bottom_left], 2)
+
+        pygame.draw.line(
+            self.screen,
+            (245, 240, 213),
+            (self._lane_screen_x(-1, 0.0), self.horizon_y),
+            (self._lane_screen_x(-1, 1.0), self.bottom_y),
+            2,
+        )
+        pygame.draw.line(
+            self.screen,
+            (245, 240, 213),
+            (self._lane_screen_x(1, 0.0), self.horizon_y),
+            (self._lane_screen_x(1, 1.0), self.bottom_y),
+            2,
+        )
+
+    def _draw_text(
+        self,
+        text: str,
+        font: pygame.font.Font,
+        color: tuple[int, int, int],
+        x: float,
+        y: float,
+        anchor: str = "topleft",
+    ) -> None:
+        surf = font.render(text, True, color)
+        rect = surf.get_rect()
+        if anchor == "midtop":
+            rect.midtop = (x, y)
+        elif anchor == "center":
+            rect.center = (x, y)
+        elif anchor == "topright":
+            rect.topright = (x, y)
+        else:
+            rect.topleft = (x, y)
+        self.screen.blit(surf, rect)
+
+    def _spawn_cluster(self, obstacles: list[dict]) -> None:
+        blocked_side = self.rng.choice((-1, 1))
+        open_lane = -blocked_side
+
+        obstacles.append({"lane": 0, "y": 1.02, "kind": "high"})
+        obstacles.append({"lane": int(blocked_side), "y": 1.02, "kind": "high"})
+
+        if self.rng.random() < 0.55:
+            obstacles.append({"lane": int(open_lane), "y": 1.16, "kind": "low"})
+
+    def _reset_decoder_state(self) -> None:
+        self.live_filter.reset()
+        self.live_buffer = np.empty((len(self.model_ch_names), 0), np.float32)
+        self.jaw_buffer = np.empty((len(self.model_ch_names), 0), np.float32)
+        self.last_live_ts = None
+        self.pred_elapsed_s = 0.0
+        self.prediction_count = 0
+        self.left_prob = 0.5
+        self.right_prob = 0.5
+        self.raw_command = 0.0
+        self.ema_command = 0.0
+        self.live_note = "warming up"
+        self.latest_pred_code = None
+        self.jaw_prob = 0.0
+        self.jaw_prev_pred = 0
+        self.jaw_event_pending = False
+        self.jaw_last_event_t = -1e9
+
+    def _pull_bci(self, now_s: float, dt_s: float) -> None:
+        data, ts = self.stream.get_data(winsize=self.stream_pull_s, picks="all")
+        if data.size > 0 and ts is not None and len(ts) > 0:
+            ts_arr = np.asarray(ts)
+            mask = np.ones_like(ts_arr, dtype=bool) if self.last_live_ts is None else (ts_arr > float(self.last_live_ts))
+            if np.any(mask):
+                x_new = np.asarray(data[:, mask], dtype=np.float32)
+                self.last_live_ts = float(ts_arr[mask][-1])
+
+                self.jaw_buffer, self.jaw_prob, self.jaw_prev_pred, should_jump = update_live_jaw_clench_state(
+                    jaw_buffer=self.jaw_buffer,
+                    x_new=x_new,
+                    keep_n=self.keep_n,
+                    jaw_window_n=self.jaw_window_n,
+                    jaw_classifier=self.jaw_classifier,
+                    jaw_idxs=self.jaw_idxs,
+                    jaw_prob=self.jaw_prob,
+                    jaw_prev_pred=self.jaw_prev_pred,
+                    jaw_prob_thresh=self.jaw_prob_thresh,
+                    jaw_last_toggle_t=self.jaw_last_event_t,
+                    jaw_refractory_s=self.jaw_refractory_s,
+                    now_t=now_s,
+                )
+                if should_jump:
+                    self.jaw_last_event_t = now_s
+                    self.jaw_event_pending = True
+
+                x_new_filt = self.live_filter.process(x_new)
+                self.live_buffer = np.concatenate((self.live_buffer, x_new_filt), axis=1)
+                if self.live_buffer.shape[1] > self.keep_n:
+                    self.live_buffer = self.live_buffer[:, -self.keep_n:]
+
+        self.pred_elapsed_s += dt_s
+        if self.pred_elapsed_s < float(self.task_cfg.live_update_interval_s):
+            return
+
+        self.pred_elapsed_s = 0.0
+        if self.live_buffer.shape[1] < self.window_n:
+            needed_s = max(0.0, (self.window_n - self.live_buffer.shape[1]) / self.sfreq)
+            self.live_note = f"warming up ({needed_s:.1f}s)"
+            self.latest_pred_code = None
+            return
+
+        x_win = self.live_buffer[:, -self.window_n:]
+        max_ptp = float(np.ptp(x_win, axis=-1).max())
+        if self.eeg_cfg.reject_peak_to_peak is not None and max_ptp > float(self.eeg_cfg.reject_peak_to_peak):
+            self.raw_command = 0.0
+            self.ema_command *= 0.85
+            self.latest_pred_code = None
+            self.live_note = "artifact reject"
+            return
+
+        p_vec = self.classifier.predict_proba(x_win[np.newaxis, ...])[0]
+        self.left_prob = float(p_vec[self.class_index[int(self.stim_cfg.left_code)]])
+        self.right_prob = float(p_vec[self.class_index[int(self.stim_cfg.right_code)]])
+        self.raw_command = float(np.clip(self.right_prob - self.left_prob + self.bias_offset, -1.0, 1.0))
+
+        alpha = float(np.clip(self.task_cfg.command_ema_alpha, 0.0, 1.0))
+        self.ema_command = self.raw_command if self.prediction_count == 0 else ((1.0 - alpha) * self.ema_command + alpha * self.raw_command)
+
+        if abs(self.ema_command) < float(self.task_cfg.command_deadband):
+            self.latest_pred_code = None
+        elif self.ema_command > 0:
+            self.latest_pred_code = int(self.stim_cfg.right_code)
+        else:
+            self.latest_pred_code = int(self.stim_cfg.left_code)
+
+        self.prediction_count += 1
+        self.live_note = "tracking"
+
+    def _poll_jump_event(self) -> bool:
+        if self.jaw_event_pending:
+            self.jaw_event_pending = False
+            return True
+        return False
 
     def _draw_game_frame(
-        *,
+        self,
         lane_idx: int,
         jump_offset: float,
         obstacles: list[dict],
         score: int,
         speed_mult: float,
-        bci_text: str,
         status_text: str,
     ) -> None:
-        road.draw()
-        lane_line_l.draw()
-        lane_line_r.draw()
+        self.screen.fill((10, 15, 22))
+        self._draw_road()
 
-        # Obstacles
-        for i, ob in enumerate(obstacles[:MAX_OBS]):
+        for ob in obstacles:
             y = float(ob["y"])
             lane = int(ob["lane"])
-            x = lane_to_x(lane, y)
-            lane_w = (2.0 * road_half_width(y)) / 3.0
-            w = max(0.08, lane_w * 0.72)
-            h = max(0.05, lane_w * 0.56)
-            r = obs_rects[i]
-            r.pos = (x, y)
-            r.width = w
-            r.height = h
-            r.draw()
+            kind = str(ob["kind"])
+            x = self._lane_screen_x(lane, y)
+            _, y_px, hw = self._road_bounds(y)
+            lane_w = hw * 1.24 / 3.0
 
-        # Player
-        player_x = lane_to_x(lane_idx, player_base_y)
-        player_y = player_base_y + jump_offset
-        jump_glow.pos = (player_x, player_y)
-        jump_glow.opacity = 0.35 if jump_offset > 0.01 else 0.0
-        jump_glow.draw()
-        player_body.pos = (player_x, player_y)
-        player_body.draw()
+            if kind == "high":
+                w = max(44.0, lane_w * 0.86)
+                h = max(26.0, lane_w * 0.52)
+                color = (215, 117, 54)
+            else:
+                w = max(36.0, lane_w * 0.74)
+                h = max(14.0, lane_w * 0.24)
+                color = (231, 198, 78)
 
-        txt_title.draw()
-        txt_score.text = f"Score\n{score:d}"
-        txt_speed.text = f"Speed\n{speed_mult:.2f}x"
-        txt_cue.text = "LEFT/RIGHT imagery move lanes | Jaw clench jumps"
-        txt_info.text = bci_text
-        txt_status.text = status_text
-        txt_score.draw()
-        txt_speed.draw()
-        txt_cue.draw()
-        txt_info.draw()
-        txt_status.draw()
-        win.flip()
+            rect = pygame.Rect(0, 0, int(w), int(h))
+            rect.center = (int(x), int(y_px))
+            pygame.draw.rect(self.screen, color, rect, border_radius=8)
+            pygame.draw.rect(self.screen, (248, 245, 234), rect, width=2, border_radius=8)
 
-    # ---------------------------------------------------------------
-    # Model preparation (same paradigm as keyboard/tetris)
-    # ---------------------------------------------------------------
-    _draw_wait_screen("Preparing MI model...", "Loading offline EDF sessions.")
+        player_x = self._lane_screen_x(lane_idx, 1.0)
+        player_y = self.player_y - jump_offset * 230.0
+        pygame.draw.circle(self.screen, (53, 204, 238), (int(player_x), int(player_y)), 28)
+        pygame.draw.circle(self.screen, (245, 245, 245), (int(player_x), int(player_y)), 28, width=3)
 
-    try:
-        shared_model = train_or_load_shared_mi_model(
-            cache_name="mi_shared_lr_model",
-            data_dir=task_cfg.data_dir,
-            edf_glob=task_cfg.edf_glob,
-            calibrate_on_participant=task_cfg.calirate_on_participant,
-            eeg_cfg=eeg_cfg,
-            task_cfg=task_cfg,
-            stim_cfg=stim_cfg,
-            model_cfg=model_cfg,
-            target_sfreq=float(sfreq),
-            target_channel_names=model_ch_names,
-            logger=logger,
+        self._draw_text("BCI Subway Runner", self.font_title, (236, 242, 247), self.width // 2, 20, "midtop")
+        self._draw_text(f"Score {score:05d}", self.font_hud, (237, 242, 246), self.width - 30, 26, "topright")
+        self._draw_text(f"Speed {speed_mult:.2f}x", self.font_hud, (168, 204, 222), self.width - 30, 56, "topright")
+
+        bci_text = (
+            f"{self.label_cfg.left_name}: {self.left_prob:.2f}   "
+            f"{self.label_cfg.right_name}: {self.right_prob:.2f}   "
+            f"jaw={self.jaw_prob:.2f}   cmd={self.ema_command:+.2f}"
         )
-        classifier = shared_model.classifier
-        class_index = shared_model.class_index
-        loso = shared_model.loso
-        counts = Counter(shared_model.class_counts)
+        self._draw_text(bci_text, self.font_overlay, (148, 209, 236), self.width // 2, self.height - 95, "midtop")
+        self._draw_text(status_text, self.font_overlay, (211, 223, 231), self.width // 2, self.height - 62, "midtop")
 
-        clf_classes = np.asarray(classifier.named_steps["clf"].classes_, dtype=int)
-        if int(stim_cfg.left_code) not in class_index or int(stim_cfg.right_code) not in class_index:
-            raise RuntimeError(
-                f"Classifier classes {clf_classes.tolist()} do not contain expected left/right codes "
-                f"{[int(stim_cfg.left_code), int(stim_cfg.right_code)]}."
-            )
+        pygame.display.flip()
 
-        if shared_model.dataset is not None:
-            dataset = shared_model.dataset
-            np.save(f"{fname}_subway_runner_windows.npy", dataset.X)
-            np.save(f"{fname}_subway_runner_labels.npy", dataset.y)
-            logger.info(
-                "Offline dataset ready: files_used=%d/%d, trials=%d, windows=%d, class_counts=%s, loso_mean=%.4f, loso_std=%.4f",
-                dataset.n_files_used,
-                dataset.n_files_found,
-                dataset.n_trials,
-                dataset.n_windows,
-                counts,
-                loso.mean_accuracy,
-                loso.std_accuracy,
-            )
-        else:
-            logger.info(
-                "Using shared cached MI model: class_counts=%s, loso_mean=%.4f, loso_std=%.4f, cache=%s",
-                counts,
-                loso.mean_accuracy,
-                loso.std_accuracy,
-                shared_model.cache_path,
-            )
-
-        with open(f"{fname}_subway_runner_model.pkl", "wb") as fh:
-            pickle.dump(classifier, fh)
-
-        _draw_wait_screen(
-            f"Model ready  LOSO={loso.mean_accuracy:.3f}±{loso.std_accuracy:.3f}",
-            "Press SPACE to start. ESC to quit.",
-            info=f"{label_cfg.left_name}: {counts.get(int(stim_cfg.left_code), 0)}   {label_cfg.right_name}: {counts.get(int(stim_cfg.right_code), 0)}",
-        )
-        while True:
-            keys = event.getKeys()
-            if "escape" in keys:
-                raise KeyboardInterrupt
-            if "space" in keys:
-                break
-            _draw_wait_screen(
-                f"Model ready  LOSO={loso.mean_accuracy:.3f}±{loso.std_accuracy:.3f}",
-                "Press SPACE to start. ESC to quit.",
-                info=f"{label_cfg.left_name}: {counts.get(int(stim_cfg.left_code), 0)}   {label_cfg.right_name}: {counts.get(int(stim_cfg.right_code), 0)}",
-            )
-
-        # Jaw calibration (same paradigm as keyboard/tetris)
-        _draw_wait_screen("Jaw calibration", f"Keep jaw relaxed for {jaw_calibration_duration_s:.1f}s")
-        calib_raw: list[np.ndarray] = []
-        last_cal_ts: float | None = None
-        cal_clock = core.Clock()
-        while cal_clock.getTime() < jaw_calibration_duration_s:
-            if "escape" in event.getKeys():
-                raise KeyboardInterrupt
-            data, ts = stream.get_data(winsize=0.25, picks="all")
-            if data.size > 0 and ts is not None and len(ts) > 0:
-                ts_arr = np.asarray(ts)
-                mask = np.ones_like(ts_arr, bool) if last_cal_ts is None else (ts_arr > float(last_cal_ts))
-                if np.any(mask):
-                    new_data = np.asarray(data[jaw_ch_idx, mask], dtype=np.float32)
-                    last_cal_ts = float(ts_arr[mask][-1])
-                    calib_raw.append(new_data)
-            remain = max(0.0, jaw_calibration_duration_s - cal_clock.getTime())
-            _draw_wait_screen("Jaw calibration", f"Keep jaw relaxed for {remain:0.1f}s")
-
-        if calib_raw:
-            try:
-                jaw_signal = np.concatenate(calib_raw).astype(np.float32)
-                floor = jaw_detector.calibrate(jaw_signal)
-                logger.info("Jaw detector calibrated: floor=%.3f", float(floor))
-            except Exception:
-                logger.warning("Jaw detector calibration failed, continuing with adaptive baseline.")
-
-    except Exception:
-        try:
-            stream.disconnect()
-        except Exception:
-            pass
-        try:
-            win.close()
-        except Exception:
-            pass
-        raise
-
-    # ---------------------------------------------------------------
-    # Live decoder state
-    # ---------------------------------------------------------------
-    live_filter = StreamingIIRFilter.from_eeg_config(
-        eeg_cfg=eeg_cfg,
-        sfreq=sfreq,
-        n_channels=len(model_ch_names),
-    )
-    live_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
-    keep_n = int(round((task_cfg.window_s + task_cfg.filter_context_s) * sfreq))
-    window_n = int(round(task_cfg.window_s * sfreq))
-    stream_pull_s = max(0.10, task_cfg.live_update_interval_s * 2.0)
-    reject_thresh = eeg_cfg.reject_peak_to_peak
-    last_live_ts: float | None = None
-
-    jaw_buffer_raw = np.empty(0, dtype=np.float32)
-    jaw_buffer_ts = np.empty(0, dtype=np.float64)
-
-    pred_clock = core.Clock()
-    prediction_count = 0
-    left_prob = 0.5
-    right_prob = 0.5
-    rest_prob = 0.0
-    raw_command = 0.0
-    ema_command = 0.0
-    live_note = "warming up"
-    latest_pred_code: int | None = None
-    bias_offset = float(task_cfg.live_bias_offset) if bool(task_cfg.enable_live_bias_offset) else 0.0
-
-    def _pull_stream_and_update_buffers() -> None:
-        nonlocal last_live_ts, live_buffer, jaw_buffer_raw, jaw_buffer_ts
-
-        data, ts = stream.get_data(winsize=stream_pull_s, picks="all")
-        if data.size == 0 or ts is None or len(ts) == 0:
-            return
-
-        ts_arr = np.asarray(ts)
-        mask = np.ones_like(ts_arr, bool) if last_live_ts is None else (ts_arr > float(last_live_ts))
-        if not np.any(mask):
-            return
-
-        x_new = np.asarray(data[:, mask], dtype=np.float32)
-        t_new = ts_arr[mask].astype(np.float64)
-        last_live_ts = float(t_new[-1])
-
-        x_new_filt = live_filter.process(x_new)
-        live_buffer = np.concatenate((live_buffer, x_new_filt), axis=1)
-        if live_buffer.shape[1] > keep_n:
-            live_buffer = live_buffer[:, -keep_n:]
-
-        jaw_raw_new = np.asarray(x_new[jaw_ch_idx], dtype=np.float32)
-        jaw_buffer_raw = np.concatenate((jaw_buffer_raw, jaw_raw_new))
-        jaw_buffer_ts = np.concatenate((jaw_buffer_ts, t_new))
-
-        keep = int(max(sfreq, window_n))
-        if jaw_buffer_raw.size > keep:
-            jaw_buffer_raw = jaw_buffer_raw[-keep:]
-            jaw_buffer_ts = jaw_buffer_ts[-keep:]
-
-    def _poll_decoder() -> None:
-        nonlocal prediction_count, left_prob, right_prob, rest_prob
-        nonlocal raw_command, ema_command, live_note, latest_pred_code
-
-        if pred_clock.getTime() < task_cfg.live_update_interval_s:
-            return
-        pred_clock.reset()
-
-        if live_buffer.shape[1] < window_n:
-            needed_s = max(0.0, (window_n - live_buffer.shape[1]) / sfreq)
-            live_note = f"warming up ({needed_s:.1f}s)"
-            latest_pred_code = None
-            return
-
-        x_win = live_buffer[:, -window_n:]
-        max_ptp = float(np.ptp(x_win, axis=-1).max())
-        if reject_thresh is not None and max_ptp > float(reject_thresh):
-            live_note = "artifact reject"
-            raw_command = 0.0
-            ema_command *= 0.85
-            latest_pred_code = None
-            return
-
-        p_vec = classifier.predict_proba(x_win[np.newaxis, ...])[0]
-        left_prob = float(p_vec[class_index[int(stim_cfg.left_code)]])
-        right_prob = float(p_vec[class_index[int(stim_cfg.right_code)]])
-        rest_prob = float(p_vec[class_index[int(task_cfg.rest_class_code)]]) if int(task_cfg.rest_class_code) in class_index else 0.0
-        raw_command = float(np.clip(right_prob - left_prob + bias_offset, -1.0, 1.0))
-
-        if int(task_cfg.rest_class_code) in class_index and rest_prob >= max(left_prob, right_prob):
-            latest_pred_code = int(task_cfg.rest_class_code)
-        else:
-            latest_pred_code = int(stim_cfg.right_code) if raw_command >= 0.0 else int(stim_cfg.left_code)
-
-        alpha = float(np.clip(task_cfg.command_ema_alpha, 0.0, 1.0))
-        ema_command = raw_command if prediction_count == 0 else (1.0 - alpha) * ema_command + alpha * raw_command
-        prediction_count += 1
-        live_note = "tracking"
-
-    def _poll_jaw_clench() -> bool:
-        if jaw_buffer_raw.size < 8 or jaw_buffer_ts.size < 8:
-            return False
-        _, clenches, _ = jaw_detector.detect(jaw_buffer_raw, jaw_buffer_ts, jaw_thresh_min)
-        return len(clenches) > 0
-
-    # ---------------------------------------------------------------
-    # Runner gameplay
-    # ---------------------------------------------------------------
-    LANE_MOVE_COOLDOWN_S = 0.30
-    JUMP_DURATION_S = 0.65
-    JUMP_HEIGHT = 0.22
-    JUMP_RETRIGGER_COOLDOWN_S = 0.50
-
-    def _show_game_over(score: int, survived_s: float, jumps: int) -> bool:
-        go_txt = visual.TextStim(
-            win,
-            text=(
-                "GAME OVER\n\n"
-                f"Score: {score}\n"
-                f"Time: {survived_s:.1f}s\n"
-                f"Jumps: {jumps}\n\n"
-                "SPACE to play again   ESC to quit"
-            ),
-            pos=(0, 0),
-            height=0.08,
-            color=(0.95, 0.30, 0.30),
-            wrapWidth=1.8,
-        )
-        while True:
-            road.draw()
-            lane_line_l.draw()
-            lane_line_r.draw()
-            go_txt.draw()
-            win.flip()
-            keys = event.getKeys()
-            if "escape" in keys:
+    def _show_game_over(self, score: int, survived_s: float, jumps: int) -> bool:
+        while self.running:
+            if self._poll_quit():
                 return False
-            if "space" in keys:
+            pressed = pygame.key.get_pressed()
+            if pressed[pygame.K_SPACE]:
                 return True
 
-    session_stats: list[dict] = []
-    rng = random.Random(42)
+            self.screen.fill((8, 12, 18))
+            self._draw_road()
+            self._draw_text("GAME OVER", self.font_title, (248, 124, 124), self.width // 2, self.height // 2 - 130, "center")
+            self._draw_text(f"Score: {score}", self.font_overlay, (235, 241, 246), self.width // 2, self.height // 2 - 52, "center")
+            self._draw_text(f"Time: {survived_s:.1f}s", self.font_overlay, (235, 241, 246), self.width // 2, self.height // 2 - 22, "center")
+            self._draw_text(f"Jumps: {jumps}", self.font_overlay, (235, 241, 246), self.width // 2, self.height // 2 + 8, "center")
+            self._draw_text("SPACE to play again   ESC to quit", self.font_overlay, (184, 206, 220), self.width // 2, self.height // 2 + 70, "center")
+            pygame.display.flip()
+            self.clock.tick(self.game_cfg.target_fps)
+        return False
 
-    try:
-        while True:
-            # Reset per-run decoder state.
-            live_filter.reset()
-            live_buffer = np.empty((len(model_ch_names), 0), np.float32)
-            jaw_buffer_raw = np.empty(0, dtype=np.float32)
-            jaw_buffer_ts = np.empty(0, dtype=np.float64)
-            jaw_detector.reset_runtime_state()
-            last_live_ts = None
-            pred_clock.reset()
-            prediction_count = 0
-            left_prob = right_prob = 0.5
-            rest_prob = raw_command = ema_command = 0.0
-            latest_pred_code = None
-            live_note = "warming up"
+    def run(self) -> None:
+        self._wait_for_space(
+            "MI Subway Runner",
+            "Press SPACE to start. ESC to quit.",
+            "MI left/right changes lane. Jaw clench jumps over low obstacles.",
+        )
 
-            lane_idx = 1
+        while self.running:
+            self._reset_decoder_state()
+
+            lane_idx = 0
             last_lane_move_t = -999.0
             jump_active = False
             jump_start_t = -999.0
@@ -518,159 +609,132 @@ def run_task(fname: str) -> None:  # noqa: C901
             jump_count = 0
 
             obstacles: list[dict] = []
-            spawn_timer = 0.6
+            spawn_timer = 0.65
             score = 0
             passed = 0
             game_over = False
 
-            game_clock = core.Clock()
-            last_frame_t = core.getTime()
+            game_start = pygame.time.get_ticks() / 1000.0
+            last_frame_t = game_start
 
-            logger.info("New Subway Runner game started.")
+            while not game_over and self.running:
+                if self._poll_quit():
+                    raise KeyboardInterrupt
 
-            try:
-                while not game_over:
-                    keys = event.getKeys()
-                    if "escape" in keys:
-                        raise KeyboardInterrupt
+                now_t = pygame.time.get_ticks() / 1000.0
+                dt = max(0.0, min(0.05, now_t - last_frame_t))
+                last_frame_t = now_t
+                elapsed = now_t - game_start
 
-                    now = core.getTime()
-                    dt = max(0.0, min(0.050, now - last_frame_t))
-                    last_frame_t = now
-                    elapsed = game_clock.getTime()
+                self._pull_bci(now_s=now_t, dt_s=dt)
 
-                    _pull_stream_and_update_buffers()
-                    _poll_decoder()
-
-                    # Lane movement from MI left/right classification.
-                    if now - last_lane_move_t >= LANE_MOVE_COOLDOWN_S:
-                        if latest_pred_code == int(stim_cfg.left_code) and lane_idx > 0:
+                conf = max(self.left_prob, self.right_prob)
+                if self.latest_pred_code is not None and conf >= float(self.game_cfg.move_confidence_thresh):
+                    if (now_t - last_lane_move_t) >= float(self.game_cfg.lane_move_cooldown_s):
+                        if self.latest_pred_code == int(self.stim_cfg.left_code) and lane_idx > -1:
                             lane_idx -= 1
-                            last_lane_move_t = now
-                            logger.info("Lane move LEFT -> lane=%d", lane_idx)
-                        elif latest_pred_code == int(stim_cfg.right_code) and lane_idx < 2:
+                            last_lane_move_t = now_t
+                        elif self.latest_pred_code == int(self.stim_cfg.right_code) and lane_idx < 1:
                             lane_idx += 1
-                            last_lane_move_t = now
-                            logger.info("Lane move RIGHT -> lane=%d", lane_idx)
+                            last_lane_move_t = now_t
 
-                    # Jaw clench jump.
-                    if _poll_jaw_clench() and (now - last_jump_trigger_t) >= JUMP_RETRIGGER_COOLDOWN_S:
-                        if not jump_active:
-                            jump_active = True
-                            jump_start_t = now
-                            jump_count += 1
-                            logger.info("Jaw clench -> jump")
-                        last_jump_trigger_t = now
+                if self._poll_jump_event() and (now_t - last_jump_trigger_t) >= float(self.game_cfg.jump_retrigger_cooldown_s):
+                    if not jump_active:
+                        jump_active = True
+                        jump_start_t = now_t
+                        jump_count += 1
+                    last_jump_trigger_t = now_t
 
-                    jump_offset = 0.0
-                    if jump_active:
-                        phase = (now - jump_start_t) / JUMP_DURATION_S
-                        if phase >= 1.0:
-                            jump_active = False
-                        else:
-                            jump_offset = JUMP_HEIGHT * float(np.sin(np.pi * phase))
+                jump_offset = 0.0
+                if jump_active:
+                    phase = (now_t - jump_start_t) / float(self.game_cfg.jump_duration_s)
+                    if phase >= 1.0:
+                        jump_active = False
+                    else:
+                        jump_offset = float(self.game_cfg.jump_height) * float(np.sin(np.pi * phase))
 
-                    # Obstacle spawn/update.
-                    speed_mult = 1.0 + 0.35 * min(1.5, elapsed / 60.0)
-                    world_speed = 0.50 * speed_mult
+                speed_mult = 1.0 + 0.35 * min(1.5, elapsed / 60.0)
+                world_speed = float(self.game_cfg.base_world_speed) * speed_mult
 
-                    spawn_interval = max(0.34, 0.92 - 0.30 * min(1.0, elapsed / 75.0))
-                    spawn_timer -= dt
-                    if spawn_timer <= 0.0:
-                        lane = rng.randint(0, 2)
-                        if obstacles and obstacles[-1]["y"] > 0.35 and int(obstacles[-1]["lane"]) == lane:
-                            lane = (lane + rng.choice((1, 2))) % 3
-                        obstacles.append({"lane": int(lane), "y": 1.02})
-                        spawn_timer = spawn_interval + rng.uniform(-0.12, 0.12)
-
-                    remove_count = 0
-                    for ob in obstacles:
-                        ob["y"] -= world_speed * dt
-                    while obstacles and obstacles[0]["y"] < -1.05:
-                        obstacles.pop(0)
-                        remove_count += 1
-
-                    if remove_count > 0:
-                        passed += remove_count
-
-                    score = int(elapsed * 12.0 + passed * 8)
-
-                    # Collision: same lane and obstacle near player y while not high enough in jump.
-                    for ob in obstacles:
-                        if int(ob["lane"]) != lane_idx:
-                            continue
-                        if abs(float(ob["y"]) - player_base_y) > 0.085:
-                            continue
-                        if jump_offset < 0.10:
-                            game_over = True
-                            logger.info("Collision detected at t=%.2fs, score=%d", elapsed, score)
-                            break
-
-                    bci_parts = [
-                        f"{label_cfg.left_name}: {left_prob:.2f}",
-                        f"{label_cfg.right_name}: {right_prob:.2f}",
-                    ]
-                    if int(task_cfg.rest_class_code) in class_index:
-                        bci_parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
-                    bci_parts.extend([f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", live_note])
-
-                    status_text = (
-                        f"Lane: {lane_idx + 1}/3   Obstacles: {len(obstacles)}   "
-                        f"Predictions: {prediction_count}   Jumps: {jump_count}"
-                    )
-
-                    _draw_game_frame(
-                        lane_idx=lane_idx,
-                        jump_offset=jump_offset,
-                        obstacles=obstacles,
-                        score=score,
-                        speed_mult=speed_mult,
-                        bci_text="   ".join(bci_parts),
-                        status_text=status_text,
-                    )
-
-            except KeyboardInterrupt:
-                survived = float(game_clock.getTime())
-                logger.info("Game interrupted by user.")
-                session_stats.append(
-                    {
-                        "score": int(score),
-                        "survived_s": survived,
-                        "predictions": int(prediction_count),
-                        "jumps": int(jump_count),
-                        "passed": int(passed),
-                    }
+                spawn_interval = max(
+                    float(self.game_cfg.spawn_interval_end_s),
+                    float(self.game_cfg.spawn_interval_start_s) - 0.30 * min(1.0, elapsed / 75.0),
                 )
+                spawn_timer -= dt
+                if spawn_timer <= 0.0:
+                    self._spawn_cluster(obstacles)
+                    spawn_timer = spawn_interval + self.rng.uniform(-0.12, 0.12)
+
+                remove_count = 0
+                for ob in obstacles:
+                    ob["y"] = float(ob["y"]) - world_speed * dt
+                while obstacles and float(obstacles[0]["y"]) < -0.10:
+                    obstacles.pop(0)
+                    remove_count += 1
+                if remove_count > 0:
+                    passed += remove_count
+
+                score = int(elapsed * 12.0 + passed * 8)
+
+                for ob in obstacles:
+                    if int(ob["lane"]) != lane_idx:
+                        continue
+                    if abs(float(ob["y"]) - 1.0) > 0.085:
+                        continue
+
+                    kind = str(ob["kind"])
+                    if kind == "low":
+                        if jump_offset < 0.08:
+                            game_over = True
+                            break
+                    else:
+                        game_over = True
+                        break
+
+                status_text = (
+                    f"Lane: {lane_idx + 2}/3   Obstacles: {len(obstacles)}   "
+                    f"Predictions: {self.prediction_count}   Jumps: {jump_count}   {self.live_note}"
+                )
+                self._draw_game_frame(
+                    lane_idx=lane_idx,
+                    jump_offset=jump_offset,
+                    obstacles=obstacles,
+                    score=score,
+                    speed_mult=speed_mult,
+                    status_text=status_text,
+                )
+                self.clock.tick(self.game_cfg.target_fps)
+
+            if not self.running:
                 break
 
-            survived = float(game_clock.getTime())
-            session_stats.append(
-                {
-                    "score": int(score),
-                    "survived_s": survived,
-                    "predictions": int(prediction_count),
-                    "jumps": int(jump_count),
-                    "passed": int(passed),
-                }
+            survived_s = (pygame.time.get_ticks() / 1000.0) - game_start
+            self.logger.info(
+                "Game over: score=%d survived_s=%.2f jumps=%d predictions=%d",
+                int(score),
+                float(survived_s),
+                int(jump_count),
+                int(self.prediction_count),
             )
-            logger.info("Game over: score=%d, survived_s=%.2f, jumps=%d", int(score), survived, int(jump_count))
-
-            if not _show_game_over(score=int(score), survived_s=survived, jumps=int(jump_count)):
+            if not self._show_game_over(score=int(score), survived_s=float(survived_s), jumps=int(jump_count)):
                 break
 
+    def shutdown(self) -> None:
+        try:
+            self.stream.disconnect()
+        except Exception:
+            pass
+        pygame.quit()
+
+
+def run_task(fname: str) -> None:
+    game = SubwayRunnerGame(fname=fname)
+    try:
+        game.run()
+    except KeyboardInterrupt:
+        pass
     finally:
-        if session_stats:
-            with open(f"{fname}_subway_runner_results.pkl", "wb") as fh:
-                pickle.dump(session_stats, fh)
-            logger.info("Saved %d run(s) to %s_subway_runner_results.pkl", len(session_stats), fname)
-        try:
-            stream.disconnect()
-        except Exception:
-            pass
-        try:
-            win.close()
-        except Exception:
-            pass
+        game.shutdown()
 
 
 if __name__ == "__main__":
