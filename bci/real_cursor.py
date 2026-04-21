@@ -522,7 +522,7 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(
 		description=(
-			"Move Windows cursor with LR MI decoding; jaw clench toggles axis between left/right and up/down."
+			"Move Windows cursor with LR MI decoding; rapid eye blinks toggle axis and jaw clenches click."
 		)
 	)
 	parser.add_argument("--pixels-per-update", type=int, default=30, help="Cursor pixels moved per decode update at full command")

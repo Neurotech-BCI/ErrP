@@ -135,10 +135,10 @@ def _apply_key_to_buffer(current_text: str, key_label: str, max_chars: int) -> s
 
 def run_task(
     fname: str,
-    move_confidence_thresh: float,
-    cursor_step_s: float,
-    jaw_select_refractory_s: float,
-    max_text_chars: int,
+    move_confidence_thresh: float = 0.60,
+    cursor_step_s: float = 0.35,
+    jaw_select_refractory_s: float = 0.35,
+    max_text_chars: int = 320,
 ) -> None:
     logger = _make_task_logger(fname)
 
