@@ -415,14 +415,14 @@ def run_task(fname: str, debug_mode: bool = False) -> None:
             sfreq=sfreq,
             model_ch_names=model_ch_names,
             logger=logger,
-            n_per_class=5,
-            hold_s=1.2,
-            prep_s=2.5,
-            iti_s=1.5,
+            n_per_class=int(task_cfg.jaw_calibration_blocks_per_class),
+            hold_s=float(task_cfg.jaw_calibration_hold_s),
+            prep_s=float(task_cfg.jaw_calibration_prep_s),
+            iti_s=float(task_cfg.jaw_calibration_iti_s),
             window_s=float(task_cfg.jaw_window_s),
             step_s=float(task_cfg.jaw_window_step_s),
             edge_trim_s=float(task_cfg.jaw_calibration_trim_s),
-            min_total_samples=6,
+            min_total_samples=12,
         )
 
     def _toggle_pause(reason: str) -> None:

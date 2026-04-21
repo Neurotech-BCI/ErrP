@@ -229,7 +229,7 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 	jaw_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
 	keep_n = int(round((task_cfg.window_s + task_cfg.filter_context_s) * sfreq))
 	window_n = int(round(task_cfg.window_s * sfreq))
-	jaw_window_n = int(round(0.60 * sfreq))
+	jaw_window_n = int(round(float(task_cfg.jaw_window_s) * sfreq))
 	stream_pull_s = max(0.08, task_cfg.live_update_interval_s * 2.0)
 	reject_thresh = eeg_cfg.reject_peak_to_peak
 	last_live_ts: float | None = None
@@ -314,14 +314,14 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 			sfreq=sfreq,
 			model_ch_names=model_ch_names,
 			logger=logger,
-			n_per_class=5,
-			hold_s=1.2,
-			prep_s=2.5,
-			iti_s=1.5,
+			n_per_class=int(task_cfg.jaw_calibration_blocks_per_class),
+			hold_s=float(task_cfg.jaw_calibration_hold_s),
+			prep_s=float(task_cfg.jaw_calibration_prep_s),
+			iti_s=float(task_cfg.jaw_calibration_iti_s),
 			window_s=float(task_cfg.jaw_window_s),
 			step_s=float(task_cfg.jaw_window_step_s),
 			edge_trim_s=float(task_cfg.jaw_calibration_trim_s),
-			min_total_samples=9,
+			min_total_samples=18,
 		)
 		with open(f"{fname}_real_cursor_face_event_model.pkl", "wb") as fh:
 			pickle.dump(face_classifier, fh)
