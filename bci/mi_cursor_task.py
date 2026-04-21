@@ -591,14 +591,21 @@ def run_task(fname: str) -> None:
     left_prob = 0.5
     right_prob = 0.5
     rest_prob = 0.0
+    decision_score = 0.0
     raw_command = 0.0
     ema_command = 0.0
     live_note = "warming up"
     bias_offset = float(task_cfg.live_bias_offset) if bool(task_cfg.enable_live_bias_offset) else 0.0
+    control_mode = str(getattr(task_cfg, "mi_control_mode", "discrete_sign")).strip().lower()
+    if control_mode not in {"discrete_sign", "probability_diff"}:
+        raise ValueError(
+            f"Unsupported mi_control_mode={task_cfg.mi_control_mode!r}. "
+            "Expected 'discrete_sign' or 'probability_diff'."
+        )
 
     def _reset_decoder_state() -> None:
         nonlocal last_live_ts, live_buffer, jaw_buffer, prediction_count
-        nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note
+        nonlocal left_prob, right_prob, rest_prob, decision_score, raw_command, ema_command, live_note
         live_filter.reset()
         live_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
         jaw_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
@@ -608,13 +615,14 @@ def run_task(fname: str) -> None:
         left_prob = 0.5
         right_prob = 0.5
         rest_prob = 0.0
+        decision_score = 0.0
         raw_command = 0.0
         ema_command = 0.0
         live_note = "trial reset"
 
     def _poll_live_decoder(pull_enabled: bool = True) -> None:
         nonlocal last_live_ts, live_buffer, jaw_buffer, prediction_count
-        nonlocal left_prob, right_prob, rest_prob, raw_command, ema_command, live_note
+        nonlocal left_prob, right_prob, rest_prob, decision_score, raw_command, ema_command, live_note
         nonlocal jaw_prob, jaw_prev_pred, jaw_event_pending, jaw_last_toggle_t
 
         if pull_enabled:
@@ -656,6 +664,7 @@ def run_task(fname: str) -> None:
         pred_clock.reset()
         if live_buffer.shape[1] < window_n:
             needed_s = max(0.0, (window_n - live_buffer.shape[1]) / sfreq)
+            decision_score = 0.0
             raw_command = 0.0
             ema_command *= 0.95
             live_note = f"warming up ({needed_s:.1f}s)"
@@ -664,6 +673,7 @@ def run_task(fname: str) -> None:
         x_win = live_buffer[:, -window_n:]
         max_ptp = float(np.ptp(x_win, axis=-1).max())
         if reject_thresh is not None and max_ptp > float(reject_thresh):
+            decision_score = 0.0
             raw_command = 0.0
             ema_command *= 0.85
             live_note = "artifact reject"
@@ -677,7 +687,11 @@ def run_task(fname: str) -> None:
             if int(task_cfg.rest_class_code) in class_index
             else 0.0
         )
-        raw_command = float(np.clip(right_prob - left_prob + bias_offset, -1.0, 1.0))
+        decision_score = float(np.clip(right_prob - left_prob + bias_offset, -1.0, 1.0))
+        if control_mode == "discrete_sign":
+            raw_command = 1.0 if decision_score >= 0.0 else -1.0
+        else:
+            raw_command = decision_score
         alpha = float(np.clip(task_cfg.command_ema_alpha, 0.0, 1.0))
         if prediction_count == 0:
             ema_command = raw_command
@@ -688,14 +702,16 @@ def run_task(fname: str) -> None:
 
         if prediction_count % 20 == 0:
             logger.info(
-                "Decode %d: left_p=%.4f, right_p=%.4f, rest_p=%.4f, raw_command=%.4f, ema_command=%.4f, bias_offset=%.4f",
+                "Decode %d: left_p=%.4f, right_p=%.4f, rest_p=%.4f, decision_score=%.4f, raw_command=%.4f, ema_command=%.4f, bias_offset=%.4f, control_mode=%s",
                 prediction_count,
                 left_prob,
                 right_prob,
                 rest_prob,
+                decision_score,
                 raw_command,
                 ema_command,
                 bias_offset,
+                control_mode,
             )
 
     def _poll_jaw_clench() -> bool:
@@ -719,7 +735,13 @@ def run_task(fname: str) -> None:
                 parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
             if bool(task_cfg.enable_jaw_clench_pause):
                 parts.append(f"jaw={jaw_prob:.2f}")
-            parts.extend([f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", live_note])
+            parts.extend([
+                f"score={decision_score:+.2f}",
+                f"cmd={ema_command:+.2f}",
+                f"bias={bias_offset:+.2f}",
+                f"mode={control_mode}",
+                live_note,
+            ])
             info.text = "   ".join(parts)
             _draw_frame()
             keys = event.getKeys()
@@ -746,7 +768,13 @@ def run_task(fname: str) -> None:
                 parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
             if bool(task_cfg.enable_jaw_clench_pause):
                 parts.append(f"jaw={jaw_prob:.2f}")
-            parts.extend([f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", "startup delay"])
+            parts.extend([
+                f"score={decision_score:+.2f}",
+                f"cmd={ema_command:+.2f}",
+                f"bias={bias_offset:+.2f}",
+                f"mode={control_mode}",
+                "startup delay",
+            ])
             info.text = "   ".join(parts)
             _draw_frame()
 
@@ -845,10 +873,12 @@ def run_task(fname: str) -> None:
                 if bool(task_cfg.enable_jaw_clench_pause):
                     parts.append(f"jaw={jaw_prob:.2f}")
                 parts.extend([
+                    f"score={decision_score:+.2f}",
                     f"raw={raw_command:+.2f}",
                     f"ema={ema_command:+.2f}",
                     f"bias={bias_offset:+.2f}",
                     f"steer={steering_state:+.2f}",
+                    f"mode={control_mode}",
                     "moving" if movement_enabled else "paused",
                 ])
                 info.text = "   ".join(parts)

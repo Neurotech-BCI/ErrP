@@ -234,11 +234,16 @@ class MICursorTaskConfig:
     # Rest interval between live LEFT/RIGHT calibration blocks.
     online_lr_calibration_iti_s: float = 2.0
 
-    # If True, add a fixed signed offset to the live right-left command.
+    # If True, add a fixed signed offset to the live right-left decision score.
     enable_live_bias_offset: bool = True
-    # Signed command offset added to (p_right - p_left). Positive favors
-    # RIGHT, negative favors LEFT.
+    # Signed offset added before converting classifier output into a steering
+    # command. Positive favors RIGHT, negative favors LEFT.
     live_bias_offset: float = 0.2
+    # Steering command mapping:
+    # - "discrete_sign": use the biased left/right decision and map it to
+    #   full-strength signed commands (-1 or +1) before smoothing.
+    # - "probability_diff": use the biased analog score (p_right - p_left).
+    mi_control_mode: str = "discrete_sign"
 
     # Window / display settings.
     fullscreen: bool = False
