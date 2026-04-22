@@ -97,14 +97,24 @@ def prepare_jaw_calibration_features(
     X_rows: list[np.ndarray] = []
     y_rows: list[int] = []
     trim_n = max(0, int(round(float(edge_trim_s) * float(sfreq))))
+    window_n = int(round(float(window_s) * float(sfreq)))
+    if window_n <= 0:
+        raise ValueError("window_s must produce at least one sample")
 
     for block, label in zip(blocks, labels):
         X_block = np.asarray(block, dtype=np.float32)
         if X_block.ndim != 2 or X_block.shape[1] == 0:
             continue
 
-        start = trim_n
-        stop = X_block.shape[1] - trim_n
+        # Keep edge trimming, but cap it per block so at least one window can remain.
+        if X_block.shape[1] > window_n:
+            trim_cap = max(0, (int(X_block.shape[1]) - int(window_n)) // 2)
+            trim_eff = min(trim_n, trim_cap)
+        else:
+            trim_eff = 0
+
+        start = int(trim_eff)
+        stop = int(X_block.shape[1] - trim_eff)
         if stop <= start:
             continue
 
@@ -280,6 +290,7 @@ def collect_visual_face_event_feature_rows(
 
         calib_blocks: list[np.ndarray] = []
         calib_labels: list[int] = []
+        collected_block_samples: list[int] = []
         for i, y_label in enumerate(labels, start=1):
             trial_name, instruction = class_map[int(y_label)]
             cue.text = "Prepare"
@@ -291,21 +302,38 @@ def collect_visual_face_event_feature_rows(
             info.text = instruction
             status.text = f"Hold for {float(hold_s):.1f}s"
             block = collect_stream_block(float(hold_s))
-            if block.shape[1] >= min_samples:
+            collected_block_samples.append(int(block.shape[1]))
+            if block.shape[1] > 0:
                 calib_blocks.append(block)
                 calib_labels.append(int(y_label))
+                if block.shape[1] < min_samples:
+                    logger.warning(
+                        "Calibration block %d is short (samples=%d, nominal_needed=%d); keeping and relying on adaptive trim/windowing.",
+                        i,
+                        int(block.shape[1]),
+                        min_samples,
+                    )
             else:
                 logger.warning(
-                    "Skipping short calibration block %d: samples=%d, needed=%d",
+                    "Skipping empty calibration block %d: samples=%d",
                     i,
                     int(block.shape[1]),
-                    min_samples,
                 )
 
             cue.text = "Relax"
             info.text = "Short break"
             status.text = ""
             wait_for_seconds(float(iti_s))
+
+        logger.info(
+            "Special-command calibration block samples: sfreq=%.3f hold_s=%.2f window_s=%.2f trim_s=%.2f nominal_needed=%d samples=%s",
+            float(sfreq),
+            float(hold_s),
+            float(window_s),
+            float(edge_trim_s),
+            int(min_samples),
+            collected_block_samples,
+        )
 
         X_cal, y_cal = prepare_jaw_calibration_features(
             blocks=calib_blocks,
@@ -319,6 +347,8 @@ def collect_visual_face_event_feature_rows(
         if X_cal.shape[0] < int(min_total_samples):
             raise ValueError(
                 "Special-command calibration failed: not enough usable windows. "
+                f"Need at least {int(min_total_samples)} windows, got {int(X_cal.shape[0])}. "
+                f"Collected block sample counts: {collected_block_samples}. "
                 "Please rerun and reduce extra movement during REST trials."
             )
         vals, cnts = np.unique(y_cal, return_counts=True)
@@ -411,15 +441,21 @@ def run_visual_face_event_calibration(
             status.text = f"Hold for {float(hold_s):.1f}s"
             block = collect_stream_block(float(hold_s))
 
-            if block.shape[1] >= min_samples:
+            if block.shape[1] > 0:
                 calib_blocks.append(block)
                 calib_labels.append(int(y_label))
+                if block.shape[1] < min_samples:
+                    logger.warning(
+                        "Calibration block %d is short (samples=%d, nominal_needed=%d); keeping and relying on adaptive trim/windowing.",
+                        i,
+                        int(block.shape[1]),
+                        min_samples,
+                    )
             else:
                 logger.warning(
-                    "Skipping short calibration block %d: samples=%d, needed=%d",
+                    "Skipping empty calibration block %d: samples=%d",
                     i,
                     int(block.shape[1]),
-                    min_samples,
                 )
 
             cue.text = "Relax"
@@ -549,15 +585,21 @@ def run_visual_jaw_calibration(
             status.text = f"Hold for {float(hold_s):.1f}s"
             block = collect_stream_block(float(hold_s))
 
-            if block.shape[1] >= min_samples:
+            if block.shape[1] > 0:
                 calib_blocks.append(block)
                 calib_labels.append(int(y_label))
+                if block.shape[1] < min_samples:
+                    logger.warning(
+                        "Calibration block %d is short (samples=%d, nominal_needed=%d); keeping and relying on adaptive trim/windowing.",
+                        i,
+                        int(block.shape[1]),
+                        min_samples,
+                    )
             else:
                 logger.warning(
-                    "Skipping short calibration block %d: samples=%d, needed=%d",
+                    "Skipping empty calibration block %d: samples=%d",
                     i,
                     int(block.shape[1]),
-                    min_samples,
                 )
 
             cue.text = "Relax"
