@@ -164,6 +164,11 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
         units="norm",
         fullscr=task_cfg.fullscreen,
     )
+    # Correct for non-square displays so circles remain circular in norm units.
+    if win.size[1] > 0:
+        view_scale_x = float(win.size[1]) / float(win.size[0])
+        win.viewScale = (view_scale_x, 1.0)
+        logger.info("Applied display aspect correction: viewScale=(%.4f, 1.0000)", view_scale_x)
 
     white = (0.90, 0.90, 0.90)
     target_color = (0.96, 0.78, 0.24)
@@ -565,7 +570,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
                 min_distance=float(task_cfg.target_min_distance_from_center),
             )
             target.pos = (float(target_pos[0]), float(target_pos[1]))
-            fail_line_x = float(-target_pos[0])
+            fail_line_x = float(-target_pos[0] + math.copysign(float(task_cfg.target_radius), target_pos[0]))
             fail_line.start = (fail_line_x, -target_limit_y)
             fail_line.end = (fail_line_x, target_limit_y)
             status.text = (

@@ -185,6 +185,11 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
         units="norm",
         fullscr=task_cfg.fullscreen,
     )
+    # Correct for non-square displays so circles remain circular in norm units.
+    if win.size[1] > 0:
+        view_scale_x = float(win.size[1]) / float(win.size[0])
+        win.viewScale = (view_scale_x, 1.0)
+        logger.info("Applied display aspect correction: viewScale=(%.4f, 1.0000)", view_scale_x)
 
     white = (0.90, 0.90, 0.90)
     target_color = (0.96, 0.78, 0.24)
