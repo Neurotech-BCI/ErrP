@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Any, Callable
 
 import numpy as np
@@ -124,6 +125,108 @@ def prepare_jaw_calibration_features(
     return np.asarray(X_rows, dtype=np.float32), np.asarray(y_rows, dtype=int)
 
 
+def collect_cue_locked_stream_block(
+    *,
+    stream: Any,
+    sfreq: float,
+    n_channels: int,
+    duration_s: float,
+    cue_offset_s: float = 0.5,
+    render_frame: Callable[[float, float], None] | None = None,
+    check_abort: Callable[[], None] | None = None,
+    query_window_s: float | None = None,
+    timeout_s: float | None = None,
+    idle_s: float = 0.01,
+    logger: logging.Logger | None = None,
+    label: str = "calibration block",
+) -> np.ndarray:
+    """Collect a cue-locked EEG block starting after a short onset delay.
+
+    The cue is assumed to be visually presented by ``render_frame``. This helper:
+    1. snapshots the most recent stream timestamp before the cue is drawn,
+    2. repeatedly polls a rolling window from the stream,
+    3. accumulates only samples newer than the pre-cue timestamp, and
+    4. returns the segment beginning ``cue_offset_s`` after cue onset.
+    """
+    duration_s = max(0.0, float(duration_s))
+    cue_offset_s = max(0.0, float(cue_offset_s))
+    total_capture_s = cue_offset_s + duration_s
+    offset_n = max(0, int(round(cue_offset_s * float(sfreq))))
+    duration_n = max(1, int(round(duration_s * float(sfreq))))
+    query_s = max(0.50, float(query_window_s or (total_capture_s + 0.50)))
+    max_wait_s = float(timeout_s or (total_capture_s + max(2.0, query_s)))
+    sleep_s = max(0.0, float(idle_s))
+
+    _data0, ts0 = stream.get_data(winsize=query_s, picks="all")
+    ts0_arr = np.asarray(ts0, dtype=np.float64) if ts0 is not None else np.empty((0,), dtype=np.float64)
+    anchor_ts = float(ts0_arr[-1]) if ts0_arr.size > 0 else None
+    last_ts_local = anchor_ts
+
+    if render_frame is not None:
+        render_frame(0.0, total_capture_s)
+
+    chunks: list[np.ndarray] = []
+    ts_chunks: list[np.ndarray] = []
+    start_wall = time.monotonic()
+
+    while (time.monotonic() - start_wall) < max_wait_s:
+        if check_abort is not None:
+            check_abort()
+
+        data, ts = stream.get_data(winsize=query_s, picks="all")
+        if data.size > 0 and ts is not None and len(ts) > 0:
+            ts_arr = np.asarray(ts, dtype=np.float64)
+            if last_ts_local is None:
+                mask = np.ones_like(ts_arr, dtype=bool)
+            else:
+                mask = ts_arr > float(last_ts_local)
+            if np.any(mask):
+                new_chunk = np.asarray(data[:, mask], dtype=np.float32)
+                new_ts = ts_arr[mask]
+                chunks.append(new_chunk)
+                ts_chunks.append(new_ts)
+                last_ts_local = float(new_ts[-1])
+
+        elapsed_s = time.monotonic() - start_wall
+        if render_frame is not None:
+            render_frame(min(elapsed_s, total_capture_s), total_capture_s)
+
+        if anchor_ts is not None and last_ts_local is not None and last_ts_local >= float(anchor_ts) + total_capture_s:
+            break
+        if sleep_s > 0.0:
+            time.sleep(sleep_s)
+
+    if not chunks:
+        return np.empty((int(n_channels), 0), dtype=np.float32)
+
+    block_all = np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
+    ts_all = np.concatenate(ts_chunks, axis=0).astype(np.float64, copy=False)
+
+    if anchor_ts is not None:
+        start_ts = float(anchor_ts) + cue_offset_s
+        stop_ts = start_ts + duration_s
+        keep = (ts_all >= start_ts) & (ts_all < stop_ts)
+        block = block_all[:, keep]
+    else:
+        block = block_all[:, offset_n : offset_n + duration_n]
+
+    if block.shape[1] < duration_n and block_all.shape[1] >= offset_n + duration_n:
+        block = block_all[:, offset_n : offset_n + duration_n]
+    elif block.shape[1] > duration_n:
+        block = block[:, :duration_n]
+
+    if logger is not None and block.shape[1] < duration_n:
+        logger.warning(
+            "Cue-locked %s ended short: collected=%d expected=%d samples (duration_s=%.2f cue_offset_s=%.2f).",
+            str(label),
+            int(block.shape[1]),
+            int(duration_n),
+            float(duration_s),
+            float(cue_offset_s),
+        )
+    return block.astype(np.float32, copy=False)
+
+
 def build_jaw_clench_classifier(
     *,
     random_state: int = 42,
@@ -237,6 +340,7 @@ def collect_visual_face_event_feature_rows(
     edge_trim_s: float = 0.5,
     include_blinks: bool = False,
     min_total_samples: int = 12,
+    cue_offset_s: float = 0.5,
 ) -> tuple[np.ndarray, np.ndarray, dict[int, int]]:
     """Collect special-command calibration rows without fitting a classifier."""
     original_layout = {
@@ -289,7 +393,10 @@ def collect_visual_face_event_feature_rows(
 
             cue.text = trial_name
             info.text = instruction
-            status.text = f"Hold for {float(hold_s):.1f}s"
+            if float(cue_offset_s) > 0.0:
+                status.text = f"Begin after {float(cue_offset_s):.1f}s. Capture lasts {float(hold_s):.1f}s"
+            else:
+                status.text = f"Hold for {float(hold_s):.1f}s"
             block = collect_stream_block(float(hold_s))
             if block.shape[1] >= min_samples:
                 calib_blocks.append(block)
@@ -354,6 +461,7 @@ def run_visual_face_event_calibration(
     step_s: float = 0.10,
     edge_trim_s: float = 0.5,
     min_total_samples: int = 18,
+    cue_offset_s: float = 0.5,
     ready_cue_text: str = "Calibration complete",
     ready_info_text: str | None = None,
     ready_status_text: str | None = None,
@@ -408,7 +516,10 @@ def run_visual_face_event_calibration(
 
             cue.text = trial_name
             info.text = instruction
-            status.text = f"Hold for {float(hold_s):.1f}s"
+            if float(cue_offset_s) > 0.0:
+                status.text = f"Begin after {float(cue_offset_s):.1f}s. Capture lasts {float(hold_s):.1f}s"
+            else:
+                status.text = f"Hold for {float(hold_s):.1f}s"
             block = collect_stream_block(float(hold_s))
 
             if block.shape[1] >= min_samples:
@@ -498,6 +609,7 @@ def run_visual_jaw_calibration(
     step_s: float = 0.10,
     edge_trim_s: float = 0.5,
     min_total_samples: int = 12,
+    cue_offset_s: float = 0.5,
 ) -> tuple[Pipeline, float, np.ndarray]:
     """Run the PsychoPy jaw calibration flow and train the classifier.
 
@@ -546,7 +658,10 @@ def run_visual_jaw_calibration(
             info.text = (
                 "Clench jaw and hold." if is_clench else "Relax face and avoid blinking/movement."
             )
-            status.text = f"Hold for {float(hold_s):.1f}s"
+            if float(cue_offset_s) > 0.0:
+                status.text = f"Begin after {float(cue_offset_s):.1f}s. Capture lasts {float(hold_s):.1f}s"
+            else:
+                status.text = f"Hold for {float(hold_s):.1f}s"
             block = collect_stream_block(float(hold_s))
 
             if block.shape[1] >= min_samples:

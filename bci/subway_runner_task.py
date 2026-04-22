@@ -20,6 +20,7 @@ from config import (
 )
 from bci_runtime import apply_runtime_config_overrides, resolve_runtime_jaw_classifier, resolve_shared_mi_model
 from derick_ml_jawclench import (
+    collect_cue_locked_stream_block,
     prepare_jaw_calibration_features,
     select_jaw_channel_indices,
     train_jaw_clench_classifier,
@@ -283,29 +284,28 @@ class SubwayRunnerGame:
             self.clock.tick(self.game_cfg.target_fps)
 
     def _collect_stream_block(self, duration_s: float, cue: str, info_text: str) -> np.ndarray:
-        chunks: list[np.ndarray] = []
-        last_ts_local: float | None = None
-        start = pygame.time.get_ticks() / 1000.0
-
-        while (pygame.time.get_ticks() / 1000.0) - start < duration_s:
+        def _check_abort() -> None:
             if self._poll_quit():
                 raise KeyboardInterrupt
 
-            data, ts = self.stream.get_data(winsize=min(0.20, duration_s), picks="all")
-            if data.size > 0 and ts is not None and len(ts) > 0:
-                ts_arr = np.asarray(ts)
-                mask = np.ones_like(ts_arr, dtype=bool) if last_ts_local is None else (ts_arr > float(last_ts_local))
-                if np.any(mask):
-                    chunks.append(np.asarray(data[:, mask], dtype=np.float32))
-                    last_ts_local = float(ts_arr[mask][-1])
+        total_s = float(self.task_cfg.special_command_cue_offset_s) + float(duration_s)
 
-            elapsed = (pygame.time.get_ticks() / 1000.0) - start
-            self._draw_wait_screen(cue, f"{max(0.0, duration_s - elapsed):0.1f}s", info_text)
+        def _render(elapsed_s: float, _capture_total_s: float) -> None:
+            remaining = max(0.0, total_s - float(elapsed_s))
+            self._draw_wait_screen(cue, f"{remaining:0.1f}s", info_text)
             self.clock.tick(self.game_cfg.target_fps)
 
-        if not chunks:
-            return np.empty((len(self.model_ch_names), 0), dtype=np.float32)
-        return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
+        return collect_cue_locked_stream_block(
+            stream=self.stream,
+            sfreq=float(self.sfreq),
+            n_channels=len(self.model_ch_names),
+            duration_s=float(duration_s),
+            cue_offset_s=float(self.task_cfg.special_command_cue_offset_s),
+            render_frame=_render,
+            check_abort=_check_abort,
+            logger=self.logger,
+            label="subway runner jaw calibration block",
+        )
 
     def _calibrate_jaw_classifier(self) -> None:
         runtime_jaw_classifier, runtime_train_acc = resolve_runtime_jaw_classifier(
