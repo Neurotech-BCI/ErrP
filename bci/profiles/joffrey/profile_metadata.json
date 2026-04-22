@@ -1,0 +1,14 @@
+{
+    "name": "Joffrey the Gentle",
+    "occupation": "King of the Andals, the Rhoynar, and the First Men",
+    "age": 19,
+    "dating_intentions": "Life partner",
+    "prompt_1": {
+        "prompt": "My best Dad Joke",
+        "response": "It's a family inside joke, you wouldn't get it"
+    },
+    "prompt_2": {
+        "prompt": "My cry-in-the-car song is",
+        "response": "Creep by Radiohead"
+    }
+}

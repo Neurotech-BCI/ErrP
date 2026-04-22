@@ -20,7 +20,11 @@ from config import (
     MICursorTaskConfig,
     StimConfig,
 )
-from derick_ml_jawclench import collect_visual_face_event_feature_rows, select_jaw_channel_indices
+from derick_ml_jawclench import (
+    collect_cue_locked_stream_block,
+    collect_visual_face_event_feature_rows,
+    select_jaw_channel_indices,
+)
 from mental_command_worker import canonicalize_channel_name, resolve_channel_order, train_or_load_shared_mi_model
 from orchestrator_config import DEFAULT_BCI_ORCHESTRATOR_CONFIG
 
@@ -179,23 +183,21 @@ def _collect_special_calibration(
             _draw()
 
     def _collect_stream_block(duration_s: float) -> np.ndarray:
-        chunks: list[np.ndarray] = []
-        last_ts_local: float | None = None
-        clk = core.Clock()
-        while clk.getTime() < duration_s:
+        def _check_abort() -> None:
             if "escape" in event.getKeys():
                 raise KeyboardInterrupt
-            data, ts = stream.get_data(winsize=min(0.20, duration_s), picks="all")
-            if data.size > 0 and ts is not None and len(ts) > 0:
-                ts_arr = np.asarray(ts)
-                mask = np.ones_like(ts_arr, dtype=bool) if last_ts_local is None else (ts_arr > float(last_ts_local))
-                if np.any(mask):
-                    chunks.append(np.asarray(data[:, mask], dtype=np.float32))
-                    last_ts_local = float(ts_arr[mask][-1])
-            _draw()
-        if not chunks:
-            return np.empty((len(model_ch_names), 0), dtype=np.float32)
-        return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
+
+        return collect_cue_locked_stream_block(
+            stream=stream,
+            sfreq=float(sfreq),
+            n_channels=len(model_ch_names),
+            duration_s=float(duration_s),
+            cue_offset_s=float(base_task_cfg.special_command_cue_offset_s),
+            render_frame=lambda _elapsed_s, _total_s: _draw(),
+            check_abort=_check_abort,
+            logger=importlib.import_module("logging").getLogger("bci_orchestrator.calibration"),
+            label="orchestrator special-command calibration block",
+        )
 
     shared_cfg = runtime.shared_config_overrides.get("task_cfg", {})
     base_task_cfg = replace(
@@ -224,6 +226,7 @@ def _collect_special_calibration(
             edge_trim_s=float(base_task_cfg.jaw_calibration_trim_s),
             include_blinks=bool(include_blinks),
             min_total_samples=18 if include_blinks else 12,
+            cue_offset_s=float(base_task_cfg.special_command_cue_offset_s),
         )
     finally:
         try:

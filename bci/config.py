@@ -307,6 +307,9 @@ class MICursorTaskConfig:
     jaw_calibration_blocks_per_class: int = 3
     # Preparation time before each jaw calibration trial.
     jaw_calibration_prep_s: float = 2.5
+    # Delay after cue onset before the calibration block begins, giving the
+    # participant time to initiate the requested face command.
+    special_command_cue_offset_s: float = 0.5
     # Hold duration for each jaw calibration block.
     jaw_calibration_hold_s: float = 5.0
     # Trim this much off the start and end of each calibration block before
@@ -503,6 +506,7 @@ class HingeTaskConfig:
     jaw_clench_refractory_s: float = 0.70
     jaw_calibration_blocks_per_class: int = 3
     jaw_calibration_prep_s: float = 2.5
+    special_command_cue_offset_s: float = 0.5
     jaw_calibration_hold_s: float = 5.0
     jaw_calibration_trim_s: float = 0.5
     jaw_calibration_iti_s: float = 1.5
@@ -524,6 +528,7 @@ class SharedBCIConfig:
     epoch_mi_cache_name: str = "mi_shared_epoch_model"
     jaw_calibration_blocks_per_class: int = 4
     jaw_calibration_prep_s: float = 2.5
+    special_command_cue_offset_s: float = 0.5
     jaw_calibration_hold_s: float = 5.0
     jaw_calibration_trim_s: float = 0.5
     jaw_calibration_iti_s: float = 1.5

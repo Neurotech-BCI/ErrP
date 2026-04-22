@@ -19,7 +19,12 @@ from bci_runtime import (
     resolve_shared_epoch_mi_model,
 )
 from config import EEGConfig, HingeTaskConfig, LSLConfig, MentalCommandModelConfig, StimConfig
-from derick_ml_jawclench import run_visual_jaw_calibration, select_jaw_channel_indices, update_live_jaw_clench_state
+from derick_ml_jawclench import (
+    collect_cue_locked_stream_block,
+    run_visual_jaw_calibration,
+    select_jaw_channel_indices,
+    update_live_jaw_clench_state,
+)
 from mental_command_worker import canonicalize_channel_name, filter_session, resolve_channel_order
 from mi_keyboard_task import run_task as run_keyboard_task
 
@@ -958,28 +963,29 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
                     calib_win.flip()
 
             def _collect_stream_block(duration_s: float) -> np.ndarray:
-                chunks: list[np.ndarray] = []
-                last_ts_local: float | None = None
-                clk = core.Clock()
-                while clk.getTime() < duration_s:
+                def _check_abort() -> None:
                     if "escape" in event.getKeys():
                         raise KeyboardInterrupt
-                    data, ts = stream.get_data(winsize=min(0.20, duration_s), picks="all")
-                    if data.size > 0 and ts is not None and len(ts) > 0:
-                        ts_arr = np.asarray(ts)
-                        mask = np.ones_like(ts_arr, dtype=bool) if last_ts_local is None else (ts_arr > float(last_ts_local))
-                        if np.any(mask):
-                            chunks.append(np.asarray(data[:, mask], dtype=np.float32))
-                            last_ts_local = float(ts_arr[mask][-1])
+
+                def _render(_elapsed_s: float, _total_s: float) -> None:
                     chrome["command_shadow"].draw()
                     chrome["command_box"].draw()
                     chrome["command_text"].draw()
                     chrome["sub_text"].draw()
                     chrome["footer"].draw()
                     calib_win.flip()
-                if not chunks:
-                    return np.empty((len(model_ch_names), 0), dtype=np.float32)
-                return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
+
+                return collect_cue_locked_stream_block(
+                    stream=stream,
+                    sfreq=float(sfreq),
+                    n_channels=len(model_ch_names),
+                    duration_s=float(duration_s),
+                    cue_offset_s=float(task_cfg.special_command_cue_offset_s),
+                    render_frame=_render,
+                    check_abort=_check_abort,
+                    logger=logger,
+                    label="hinge jaw calibration block",
+                )
 
             jaw_classifier, jaw_train_acc, _jaw_y = run_visual_jaw_calibration(
                 cue=chrome["command_text"],
@@ -1001,6 +1007,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
                 step_s=float(task_cfg.jaw_window_step_s),
                 edge_trim_s=float(task_cfg.jaw_calibration_trim_s),
                 min_total_samples=12,
+                cue_offset_s=float(task_cfg.special_command_cue_offset_s),
             )
             logger.info("Runtime jaw calibration complete: train_acc=%.3f", float(jaw_train_acc))
             _close_window(calib_win)
