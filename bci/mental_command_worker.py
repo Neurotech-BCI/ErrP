@@ -249,6 +249,7 @@ class SharedMIModelResult:
     class_index: dict[int, int]
     loso: LOSOResult
     class_counts: dict[int, int]
+    channel_names: list[str]
     loaded_from_cache: bool
     dataset: OfflineMIDataset | None
     cache_path: str
@@ -602,6 +603,7 @@ def train_or_load_shared_mi_model(
                     class_index=class_index,
                     loso=loso,
                     class_counts=class_counts,
+                    channel_names=[str(name) for name in target_channel_names],
                     loaded_from_cache=True,
                     dataset=None,
                     cache_path=str(cache_path),
@@ -651,6 +653,7 @@ def train_or_load_shared_mi_model(
         class_index=class_index,
         loso=loso,
         class_counts=class_counts,
+        channel_names=[str(name) for name in target_channel_names],
         loaded_from_cache=False,
         dataset=dataset,
         cache_path=str(cache_path),

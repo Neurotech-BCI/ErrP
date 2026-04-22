@@ -101,7 +101,6 @@ def _prepare_stream_signature(runtime: BCIOrchestratorRuntime):
         "orchestrator",
         lsl_cfg=LSLConfig(),
         eeg_cfg=EEGConfig(
-            picks=("Pz", "F4", "C4", "P4", "P3", "C3", "F3"),
             l_freq=8.0,
             h_freq=30.0,
             reject_peak_to_peak=150.0,
@@ -118,12 +117,18 @@ def _prepare_stream_signature(runtime: BCIOrchestratorRuntime):
     )
     stream.connect(acquisition_delay=0.001, processing_flags="all")
     available = list(stream.info["ch_names"])
-    model_ch_names, _missing = resolve_channel_order(available, eeg_cfg.picks)
+    model_ch_names, missing = resolve_channel_order(available, eeg_cfg.picks)
+    if missing:
+        raise RuntimeError(
+            f"Live stream is missing configured EEG picks {missing}. "
+            f"Configured picks: {list(eeg_cfg.picks)}. Available channels: {available}"
+        )
     if len(model_ch_names) < 2:
-        event_key = canonicalize_channel_name(lsl_cfg.event_channels)
-        model_ch_names = [ch for ch in available if canonicalize_channel_name(ch) != event_key]
-    if len(model_ch_names) < 2:
-        raise RuntimeError(f"Need >=2 EEG channels, found: {available}")
+        raise RuntimeError(
+            "Need at least 2 configured EEG channels after applying picks. "
+            f"Configured picks: {list(eeg_cfg.picks)}. Resolved channels: {model_ch_names}. "
+            f"Available channels: {available}"
+        )
     stream.pick(model_ch_names)
     sfreq = float(stream.info["sfreq"])
     return stream, sfreq, model_ch_names, eeg_cfg

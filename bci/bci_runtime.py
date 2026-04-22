@@ -13,7 +13,7 @@ from derick_ml_jawclench import (
     train_face_event_classifier,
     train_jaw_clench_classifier,
 )
-from mental_command_worker import SharedMIModelResult, train_or_load_shared_mi_model
+from mental_command_worker import SharedMIModelResult, canonicalize_channel_name, train_or_load_shared_mi_model
 
 
 @dataclass
@@ -75,6 +75,13 @@ def get_active_runtime() -> BCIOrchestratorRuntime | None:
     return _ACTIVE_RUNTIME
 
 
+def _channel_lists_match(
+    left: list[str] | tuple[str, ...],
+    right: list[str] | tuple[str, ...],
+) -> bool:
+    return [canonicalize_channel_name(ch) for ch in left] == [canonicalize_channel_name(ch) for ch in right]
+
+
 def apply_runtime_config_overrides(task_name: str, **named_configs: Any) -> dict[str, Any]:
     runtime = get_active_runtime()
     if runtime is None:
@@ -111,9 +118,16 @@ def resolve_shared_mi_model(
 ) -> SharedMIModelResult:
     runtime = get_active_runtime()
     if runtime is not None and runtime.shared_mi_model is not None:
+        if _channel_lists_match(runtime.shared_mi_model.channel_names, target_channel_names):
+            if logger is not None:
+                logger.info("Using orchestrator-provided shared MI model.")
+            return runtime.shared_mi_model
         if logger is not None:
-            logger.info("Using orchestrator-provided shared MI model.")
-        return runtime.shared_mi_model
+            logger.info(
+                "Orchestrator-provided shared MI model channels %s do not match requested channels %s; loading or retraining a matching MI model.",
+                runtime.shared_mi_model.channel_names,
+                list(target_channel_names),
+            )
 
     return train_or_load_shared_mi_model(
         cache_name=str(cache_name),
@@ -146,9 +160,16 @@ def resolve_shared_epoch_mi_model(
 ) -> SharedMIModelResult:
     runtime = get_active_runtime()
     if runtime is not None and runtime.shared_epoch_mi_model is not None:
+        if _channel_lists_match(runtime.shared_epoch_mi_model.channel_names, target_channel_names):
+            if logger is not None:
+                logger.info("Using orchestrator-provided shared epoch MI model.")
+            return runtime.shared_epoch_mi_model
         if logger is not None:
-            logger.info("Using orchestrator-provided shared epoch MI model.")
-        return runtime.shared_epoch_mi_model
+            logger.info(
+                "Orchestrator-provided shared epoch MI model channels %s do not match requested channels %s; loading or retraining a matching epoch MI model.",
+                runtime.shared_epoch_mi_model.channel_names,
+                list(target_channel_names),
+            )
 
     return train_or_load_shared_mi_model(
         cache_name=str(cache_name),
@@ -165,9 +186,25 @@ def resolve_shared_epoch_mi_model(
     )
 
 
-def resolve_runtime_jaw_classifier(*, logger: Any = None, min_total_samples: int = 12) -> tuple[Pipeline | None, float | None]:
+def resolve_runtime_jaw_classifier(
+    *,
+    logger: Any = None,
+    min_total_samples: int = 12,
+    requested_channel_names: list[str] | tuple[str, ...] | None = None,
+) -> tuple[Pipeline | None, float | None]:
     runtime = get_active_runtime()
     if runtime is None or runtime.face_calibration is None:
+        return None, None
+    if requested_channel_names is not None and not _channel_lists_match(
+        runtime.face_calibration.channel_names,
+        requested_channel_names,
+    ):
+        if logger is not None:
+            logger.info(
+                "Skipping orchestrator jaw calibration cache because channels %s do not match requested channels %s.",
+                runtime.face_calibration.channel_names,
+                list(requested_channel_names),
+            )
         return None, None
     clf, train_acc = runtime.face_calibration.fit_jaw_classifier(min_total_samples=int(min_total_samples))
     if logger is not None:
@@ -183,9 +220,21 @@ def resolve_runtime_face_classifier(
     *,
     logger: Any = None,
     min_total_samples: int = 18,
+    requested_channel_names: list[str] | tuple[str, ...] | None = None,
 ) -> tuple[Pipeline | None, float | None, dict[int, int] | None]:
     runtime = get_active_runtime()
     if runtime is None or runtime.face_calibration is None or not runtime.face_calibration.includes_blink:
+        return None, None, None
+    if requested_channel_names is not None and not _channel_lists_match(
+        runtime.face_calibration.channel_names,
+        requested_channel_names,
+    ):
+        if logger is not None:
+            logger.info(
+                "Skipping orchestrator face-event calibration cache because channels %s do not match requested channels %s.",
+                runtime.face_calibration.channel_names,
+                list(requested_channel_names),
+            )
         return None, None, None
     clf, train_acc, class_counts = runtime.face_calibration.fit_face_classifier(
         min_total_samples=int(min_total_samples)

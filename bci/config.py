@@ -34,8 +34,8 @@ class StimConfig:
 
 @dataclass(frozen=True)
 class EEGConfig:
-    picks: tuple[str, ...] = ("Pz", "F4", "C4", "P4", "P3", "C3", "F3")
-    #picks: tuple[str, ...] = ("Pz", "F4", "C4", "P4", "C3", "F3")
+    #picks: tuple[str, ...] = ("Pz", "F4", "C4", "P4", "P3", "C3", "F3")
+    picks: tuple[str, ...] = ("Pz", "F4", "C4", "P4", "C3", "F3")
     #picks: tuple[str, ...] = ("C4", "C3")
 
     # Optional reference channel to apply consistently to offline EDFs and

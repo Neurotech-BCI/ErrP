@@ -89,6 +89,13 @@ The override keys should match the config object names used by tasks, most commo
 - `lsl_cfg`
 - `stim_cfg`
 
+`eeg_cfg.picks` is treated as a strict channel contract for orchestrated runs:
+
+- the live LSL stream is reduced to exactly those EEG channels, in that order
+- offline EDF loading for shared MI models uses the same channel list
+- shared jaw / blink calibration uses the same selected channels
+- if the requested picks are missing from the live stream, the workflow now fails fast instead of silently falling back to other channels
+
 ## Shared Calibration Behavior
 
 The orchestrator prepares shared resources once at startup:
