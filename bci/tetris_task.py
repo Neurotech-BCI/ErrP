@@ -96,7 +96,7 @@ PIECE_COLORS: dict[str, tuple[float, float, float]] = {
     "J": (0.10, 0.30, 0.95),
 }
 
-BASE_DROP_INTERVAL_S = 1.0
+BASE_DROP_INTERVAL_S = 0.5
 LEVEL_SPEEDUP = 0.08
 
 
