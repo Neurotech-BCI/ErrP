@@ -1094,29 +1094,30 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
                 remaining = max(0.0, float(task_cfg.prep_duration_s) - prep_clock.getTime())
                 _draw(command="Prepare to swipe left to pass or right to like", sub=f"Prepare your chosen imagery. {remaining:.1f}s remaining")
 
+            _poll_live()
             pre_context = raw_history[:, -context_n:].copy() if context_n > 0 and raw_history.shape[1] > 0 else np.empty((len(model_ch_names), 0), dtype=np.float32)
-            _draw(command="Execute swipe", sub="Perform your chosen imagery now.")
-            execute_block_chunks: list[np.ndarray] = []
-            local_last_ts = last_live_ts
-            execute_clock = core.Clock()
-            while execute_clock.getTime() < float(task_cfg.execute_duration_s):
+            execute_duration_s = float(task_cfg.execute_duration_s)
+
+            def _check_execute_abort() -> None:
                 if ui is not None and "escape" in ui.consume_keys():
                     raise KeyboardInterrupt
-                data, ts = stream.get_data(winsize=min(0.20, float(task_cfg.execute_duration_s)), picks="all")
-                if data.size > 0 and ts is not None and len(ts) > 0:
-                    ts_arr = np.asarray(ts)
-                    mask = np.ones_like(ts_arr, dtype=bool) if local_last_ts is None else (ts_arr > float(local_last_ts))
-                    if np.any(mask):
-                        x_new = np.asarray(data[:, mask], dtype=np.float32)
-                        execute_block_chunks.append(x_new)
-                        local_last_ts = float(ts_arr[mask][-1])
-                remaining = max(0.0, float(task_cfg.execute_duration_s) - execute_clock.getTime())
+
+            def _render_execute(elapsed_s: float, total_s: float) -> None:
+                remaining = max(0.0, total_s - elapsed_s)
                 _draw(command="Execute swipe", sub=f"Perform your chosen imagery now. {remaining:.1f}s remaining")
-            last_live_ts = local_last_ts
-            execute_block = (
-                np.concatenate(execute_block_chunks, axis=1).astype(np.float32, copy=False)
-                if execute_block_chunks
-                else np.empty((len(model_ch_names), 0), dtype=np.float32)
+
+            # Collect the online MI epoch from a cue-locked window so the decoded
+            # block consistently spans the full post-cue execute interval.
+            execute_block = collect_cue_locked_stream_block(
+                stream=stream,
+                sfreq=float(sfreq),
+                n_channels=len(model_ch_names),
+                duration_s=execute_duration_s,
+                cue_offset_s=0.0,
+                render_frame=_render_execute,
+                check_abort=_check_execute_abort,
+                logger=logger,
+                label=f"hinge execute block trial {trial_idx}",
             )
             raw_history = np.concatenate((raw_history, execute_block), axis=1)
             if raw_history.shape[1] > keep_n:

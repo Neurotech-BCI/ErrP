@@ -514,6 +514,7 @@ class MIRacingTaskConfig:
     avoid_repeating_spawn_lane: bool = True
 
     # Session flow / scoring.
+    seed: int | None = None
     countdown_s: float = 3.0
     trials_to_complete: int = 60
     max_collisions: int = 12
