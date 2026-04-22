@@ -95,10 +95,14 @@ def _apply_overrides(runtime: BCIOrchestratorRuntime, task_name: str, **named_co
     return out
 
 
-def _prepare_stream_signature(runtime: BCIOrchestratorRuntime):
+def _prepare_stream_signature(
+    runtime: BCIOrchestratorRuntime,
+    *,
+    task_name_for_overrides: str = "orchestrator",
+):
     base_cfgs = _apply_overrides(
         runtime,
-        "orchestrator",
+        str(task_name_for_overrides),
         lsl_cfg=LSLConfig(),
         eeg_cfg=EEGConfig(
             l_freq=8.0,
@@ -138,8 +142,12 @@ def _collect_special_calibration(
     runtime: BCIOrchestratorRuntime,
     *,
     include_blinks: bool,
+    task_name_for_overrides: str = "orchestrator",
 ) -> FaceCalibrationDataset:
-    stream, sfreq, model_ch_names, _eeg_cfg = _prepare_stream_signature(runtime)
+    stream, sfreq, model_ch_names, _eeg_cfg = _prepare_stream_signature(
+        runtime,
+        task_name_for_overrides=str(task_name_for_overrides),
+    )
     jaw_idxs = select_jaw_channel_indices(model_ch_names)
 
     win = visual.Window(size=(1200, 700), color=(-0.08, -0.08, -0.08), units="norm", fullscr=False)
@@ -238,7 +246,10 @@ def _collect_special_calibration(
 
 
 def _prepare_shared_mi_model(runtime: BCIOrchestratorRuntime) -> None:
-    stream, sfreq, model_ch_names, eeg_cfg = _prepare_stream_signature(runtime)
+    stream, sfreq, model_ch_names, eeg_cfg = _prepare_stream_signature(
+        runtime,
+        task_name_for_overrides="orchestrator",
+    )
     try:
         cfgs = _apply_overrides(
             runtime,
@@ -272,7 +283,10 @@ def _prepare_shared_mi_model(runtime: BCIOrchestratorRuntime) -> None:
 
 
 def _prepare_shared_epoch_mi_model(runtime: BCIOrchestratorRuntime) -> None:
-    stream, sfreq, model_ch_names, eeg_cfg = _prepare_stream_signature(runtime)
+    stream, sfreq, model_ch_names, eeg_cfg = _prepare_stream_signature(
+        runtime,
+        task_name_for_overrides="hinge_task",
+    )
     try:
         cfgs = _apply_overrides(
             runtime,
@@ -341,9 +355,14 @@ def run_orchestrated_session(cfg: BCIOrchestratorConfig) -> None:
         if "hinge_task" in task_names and _hinge_requires_face(runtime):
             needs_blinks = True
         if any(_task_requires_jaw(name) for name in task_names):
+            jaw_calibration_task_name = next(
+                (str(name) for name in task_names if _task_requires_jaw(name)),
+                "orchestrator",
+            )
             runtime.face_calibration = _collect_special_calibration(
                 runtime,
                 include_blinks=bool(needs_blinks),
+                task_name_for_overrides=str(jaw_calibration_task_name),
             )
 
         for item_cfg in cfg.task_sequence:
