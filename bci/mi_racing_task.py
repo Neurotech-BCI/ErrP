@@ -212,6 +212,8 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
     classifier = None
     class_index: dict[int, int] | None = None
 
+    obstacles: list[ObstacleState] = []
+
     def _draw_world() -> None:
         road.draw()
         lane_divider_1.draw()
@@ -326,7 +328,6 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
     latest_pred_code: int | None = None
     live_note = "warming up"
 
-    obstacles: list[ObstacleState] = []
     obstacle_counter = 0
     spawn_timer = 0.0
     last_spawn_lane: int | None = None
