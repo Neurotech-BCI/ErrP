@@ -457,6 +457,77 @@ class KnobTaskConfig:
 
 
 @dataclass(frozen=True)
+class MIRacingTaskConfig:
+    # Folder of cued MI EDF sessions used to fit the live model at startup.
+    data_dir: str = ""
+    edf_glob: str = "*.edf"
+
+    # Match offline EDF units to the live stream before preprocessing.
+    offline_eeg_scale_to_match_live: float = 1e6
+    live_eeg_units: str = "uV"
+
+    # Shared-model dataset window definition.
+    epoch_duration_s: float = 3.0
+    window_s: float = 1.0
+    window_step_s: float = 0.50
+    filter_context_s: float = 2.0
+    live_update_interval_s: float = 0.10
+
+    # Optional REST handling in live decoding.
+    rest_class_code: int = 99
+    respect_rest_class: bool = True
+
+    # Decoder command shaping.
+    mi_control_mode: str = "discrete_sign"
+    command_ema_alpha: float = 0.30
+    command_deadband: float = 0.18
+    move_confidence_thresh: float = 0.56
+    lane_switch_cooldown_s: float = 0.24
+    lane_transition_rate: float = 11.0
+    enable_live_bias_offset: bool = False
+    live_bias_offset: float = 0.0
+
+    # Stream pull cadence multiplier relative to `live_update_interval_s`.
+    stream_pull_multiplier: float = 2.0
+
+    # Layout / visuals.
+    fullscreen: bool = False
+    win_size: tuple[int, int] = (1280, 760)
+    road_width: float = 1.28
+    road_height: float = 1.72
+    lane_divider_width: float = 0.012
+    car_width: float = 0.17
+    car_height: float = 0.12
+    car_y: float = -0.74
+    obstacle_width: float = 0.20
+    obstacle_height: float = 0.12
+
+    # Obstacle flow.
+    obstacle_spawn_y: float = 0.98
+    obstacle_despawn_y: float = -1.05
+    obstacle_resolution_y: float = -0.66
+    obstacle_spawn_interval_s: float = 1.10
+    obstacle_speed_norm_s: float = 0.75
+    obstacle_speedup_per_obstacle: float = 0.002
+    obstacle_speed_max_norm_s: float = 1.18
+    max_obstacles_on_screen: int = 7
+    avoid_repeating_spawn_lane: bool = True
+
+    # Session flow / scoring.
+    countdown_s: float = 3.0
+    trials_to_complete: int = 60
+    max_collisions: int = 12
+    dodge_points: int = 50
+    collision_points: int = -90
+    feedback_duration_s: float = 0.40
+
+    # Optional keyboard fallback while developing.
+    enable_keyboard_override: bool = False
+
+    calirate_on_participant: str = "mi"
+
+
+@dataclass(frozen=True)
 class HingeTaskConfig:
     # Folder of Hinge-style profile directories. Each profile folder should
     # contain picture_1.jpg, picture_2.jpg, picture_3.jpg and

@@ -34,11 +34,11 @@ TASK_MODULES = {
     "jaw_pause_cursor_task": "jaw_pause_cursor_task",
     "knob_task": "knob_task",
     "lr_cursor_task": "lr_cursor_task",
+    "mi_racing_task": "mi_racing_task",
     "mental_command_task": "mental_command_task",
     "mi_cursor_task": "mi_cursor_task",
     "mi_keyboard_task": "mi_keyboard_task",
     "real_cursor": "real_cursor",
-    "subway_runner_task": "subway_runner_task",
     "tetris_task": "tetris_task",
 }
 
