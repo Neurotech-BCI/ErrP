@@ -1,0 +1,13 @@
+{
+    "name": "Heinz Doofenshmirtz",
+    "occupation": "Evil Scientist",
+    "age": 47,
+    "prompt_1": {
+        "prompt": "Together, we could",
+        "response": "Takeover the entire Tri-State Area"
+    },
+    "prompt_2": {
+        "prompt": "A quick rant about",
+        "response": "Perry the Platypus"
+    }
+}

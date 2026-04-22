@@ -26,6 +26,7 @@ task_sequence=(
 
 Supported task names:
 
+- `hinge_task`
 - `jaw_pause_cursor_task`
 - `knob_task`
 - `lr_cursor_task`
@@ -95,6 +96,10 @@ The orchestrator prepares shared resources once at startup:
 - MI classifier:
   - loaded from cache if available
   - otherwise trained from offline EDF sessions
+- Full-epoch MI classifier:
+  - runs only if `hinge_task` is in the sequence
+  - loaded from cache if available
+  - otherwise trained from offline EDF sessions using one full 3 second epoch per trial
 - Jaw calibration:
   - runs only if at least one jaw-using task is in the sequence
 - Jaw + blink calibration:
@@ -105,4 +110,3 @@ The special-command calibration data are collected once, then each task fits the
 ## Output Naming
 
 `participant_name` in [orchestrator_config.py](ErrP/bci/orchestrator_config.py) is used to build the file prefix for logs and saved outputs.
-

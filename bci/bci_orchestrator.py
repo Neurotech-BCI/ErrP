@@ -11,13 +11,22 @@ from mne_lsl.stream import StreamLSL
 from psychopy import core, event, visual
 
 from bci_runtime import BCIOrchestratorRuntime, FaceCalibrationDataset, TaskSequenceItem, set_active_runtime
-from config import BCIOrchestratorConfig, EEGConfig, LSLConfig, MentalCommandModelConfig, MICursorTaskConfig, StimConfig
+from config import (
+    BCIOrchestratorConfig,
+    EEGConfig,
+    HingeTaskConfig,
+    LSLConfig,
+    MentalCommandModelConfig,
+    MICursorTaskConfig,
+    StimConfig,
+)
 from derick_ml_jawclench import collect_visual_face_event_feature_rows, select_jaw_channel_indices
 from mental_command_worker import canonicalize_channel_name, resolve_channel_order, train_or_load_shared_mi_model
 from orchestrator_config import DEFAULT_BCI_ORCHESTRATOR_CONFIG
 
 
 TASK_MODULES = {
+    "hinge_task": "hinge_task",
     "jaw_pause_cursor_task": "jaw_pause_cursor_task",
     "knob_task": "knob_task",
     "lr_cursor_task": "lr_cursor_task",
@@ -30,6 +39,7 @@ TASK_MODULES = {
 }
 
 JAW_TASKS = {
+    "hinge_task",
     "jaw_pause_cursor_task",
     "mi_cursor_task",
     "mi_keyboard_task",
@@ -247,6 +257,40 @@ def _prepare_shared_mi_model(runtime: BCIOrchestratorRuntime) -> None:
             pass
 
 
+def _prepare_shared_epoch_mi_model(runtime: BCIOrchestratorRuntime) -> None:
+    stream, sfreq, model_ch_names, eeg_cfg = _prepare_stream_signature(runtime)
+    try:
+        cfgs = _apply_overrides(
+            runtime,
+            "hinge_task",
+            stim_cfg=StimConfig(),
+            model_cfg=MentalCommandModelConfig(),
+            task_cfg=HingeTaskConfig(),
+            eeg_cfg=eeg_cfg,
+        )
+        stim_cfg = cfgs["stim_cfg"]
+        model_cfg = cfgs["model_cfg"]
+        task_cfg = cfgs["task_cfg"]
+        eeg_cfg = cfgs["eeg_cfg"]
+        runtime.shared_epoch_mi_model = train_or_load_shared_mi_model(
+            cache_name=runtime.shared_config_overrides.get("shared", {}).get("epoch_mi_cache_name", "mi_shared_epoch_model"),
+            data_dir=task_cfg.data_dir,
+            edf_glob=task_cfg.edf_glob,
+            calibrate_on_participant=task_cfg.calirate_on_participant,
+            eeg_cfg=eeg_cfg,
+            task_cfg=task_cfg,
+            stim_cfg=stim_cfg,
+            model_cfg=model_cfg,
+            target_sfreq=float(sfreq),
+            target_channel_names=model_ch_names,
+        )
+    finally:
+        try:
+            stream.disconnect()
+        except Exception:
+            pass
+
+
 def _run_task(item: TaskSequenceItem, participant_name: str) -> None:
     module_name = TASK_MODULES[str(item.task_name)]
     mod = importlib.import_module(module_name)
@@ -266,7 +310,10 @@ def run_orchestrated_session(cfg: BCIOrchestratorConfig) -> None:
     runtime = BCIOrchestratorRuntime(
         shared_config_overrides={
             **dict(cfg.shared_config_overrides),
-            "shared": {"mi_cache_name": cfg.shared.mi_cache_name},
+            "shared": {
+                "mi_cache_name": cfg.shared.mi_cache_name,
+                "epoch_mi_cache_name": cfg.shared.epoch_mi_cache_name,
+            },
         },
         task_config_overrides=dict(cfg.task_config_overrides),
     )
@@ -274,6 +321,8 @@ def run_orchestrated_session(cfg: BCIOrchestratorConfig) -> None:
     try:
         _prepare_shared_mi_model(runtime)
         task_names = [item.task_name for item in cfg.task_sequence]
+        if "hinge_task" in task_names:
+            _prepare_shared_epoch_mi_model(runtime)
         if any(_task_requires_jaw(name) for name in task_names):
             runtime.face_calibration = _collect_special_calibration(
                 runtime,

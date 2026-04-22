@@ -139,7 +139,8 @@ def run_task(
     cursor_step_s: float = 0.70,
     jaw_select_refractory_s: float = 0.35,
     max_text_chars: int = 320,
-) -> None:
+    raise_on_escape: bool = False,
+) -> str | None:
     logger = _make_task_logger(fname)
 
     lsl_cfg = LSLConfig()
@@ -591,6 +592,8 @@ def run_task(
 
     except KeyboardInterrupt:
         logger.info("Session interrupted by user.")
+        if raise_on_escape:
+            raise
     finally:
         if submitted_text is not None:
             logger.info("Keyboard submission complete. Ending task with text=%r", submitted_text)
@@ -602,6 +605,7 @@ def run_task(
             win.close()
         except Exception:
             pass
+    return submitted_text
 
 
 if __name__ == "__main__":

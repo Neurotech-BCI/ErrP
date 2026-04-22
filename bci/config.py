@@ -99,11 +99,11 @@ class SerialConfig:
         for p in serial.tools.list_ports.comports():
             if p.vid == vid and p.pid == pid:
                 return p.device
-        raise RuntimeError(
-            "No valid trigger hub found"
-        )
+        return None
 
-    port: str = find_port_by_vid_pid(vid=0x2341, pid=0x8037)
+    # Keep trigger-hub discovery lazy so GUI-only tasks can import config.py
+    # without requiring the hardware to be connected.
+    port: str | None = find_port_by_vid_pid(vid=0x2341, pid=0x8037)
     baudrate: int = 115200
     pulse_width_s: float = 0.01  # send code then reset-to-0 after this
 
@@ -450,6 +450,65 @@ class KnobTaskConfig:
 
 
 @dataclass(frozen=True)
+class HingeTaskConfig:
+    # Folder of Hinge-style profile directories. Each profile folder should
+    # contain picture_1.jpg, picture_2.jpg, picture_3.jpg and
+    # profile_metadata.json.
+    profiles_dir: str = str(Path(__file__).resolve().parent / "profiles")
+
+    # Folder of cued MI EDF sessions used to fit the full-epoch swipe model.
+    data_dir: str = ""
+    edf_glob: str = "*.edf"
+
+    # Match offline EDF units to the live stream before preprocessing.
+    offline_eeg_scale_to_match_live: float = 1e6
+    live_eeg_units: str = "uV"
+
+    # Offline and online swipe decoding both use one full 3 second execution
+    # epoch per trial.
+    epoch_duration_s: float = 3.0
+    window_s: float = 3.0
+    window_step_s: float = 3.0
+    filter_context_s: float = 2.0
+
+    # Cued trial timing.
+    prep_duration_s: float = 3.0
+    execute_duration_s: float = 3.0
+    outcome_duration_s: float = 1.15
+    inter_trial_pause_s: float = 0.35
+
+    # UI / layout.
+    fullscreen: bool = False
+    win_size: tuple[int, int] = (1280, 760)
+    picture_box_width: float = 0.42
+    picture_box_height: float = 0.29
+
+    # Optional keyboard follow-up after a right swipe.
+    enable_keyboard_on_match: bool = True
+    keyboard_move_confidence_thresh: float = 0.60
+    keyboard_cursor_step_s: float = 0.70
+    keyboard_jaw_select_refractory_s: float = 0.35
+    keyboard_max_text_chars: int = 320
+
+    # Full-epoch swipe model should remain unbiased.
+    enable_live_bias_offset: bool = False
+    live_bias_offset: float = 0.0
+
+    # Shared jaw calibration settings.
+    jaw_clench_prob_thresh: float = 0.70
+    jaw_clench_refractory_s: float = 0.70
+    jaw_calibration_blocks_per_class: int = 3
+    jaw_calibration_prep_s: float = 2.5
+    jaw_calibration_hold_s: float = 5.0
+    jaw_calibration_trim_s: float = 0.5
+    jaw_calibration_iti_s: float = 1.5
+    jaw_window_s: float = 0.60
+    jaw_window_step_s: float = 0.10
+
+    calirate_on_participant: str = "mi"
+
+
+@dataclass(frozen=True)
 class MentalCommandModelConfig:
     cov_estimator: str = "oas"
 
@@ -458,6 +517,7 @@ class MentalCommandModelConfig:
 class SharedBCIConfig:
     participant_name: str = "participant"
     mi_cache_name: str = "mi_shared_lr_model"
+    epoch_mi_cache_name: str = "mi_shared_epoch_model"
     jaw_calibration_blocks_per_class: int = 4
     jaw_calibration_prep_s: float = 2.5
     jaw_calibration_hold_s: float = 5.0

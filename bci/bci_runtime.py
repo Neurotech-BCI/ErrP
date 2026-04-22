@@ -56,6 +56,7 @@ class TaskSequenceItem:
 @dataclass
 class BCIOrchestratorRuntime:
     shared_mi_model: SharedMIModelResult | None = None
+    shared_epoch_mi_model: SharedMIModelResult | None = None
     face_calibration: FaceCalibrationDataset | None = None
     shared_config_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     task_config_overrides: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
@@ -113,6 +114,41 @@ def resolve_shared_mi_model(
         if logger is not None:
             logger.info("Using orchestrator-provided shared MI model.")
         return runtime.shared_mi_model
+
+    return train_or_load_shared_mi_model(
+        cache_name=str(cache_name),
+        data_dir=str(data_dir),
+        edf_glob=str(edf_glob),
+        calibrate_on_participant=str(calibrate_on_participant),
+        eeg_cfg=eeg_cfg,
+        task_cfg=task_cfg,
+        stim_cfg=stim_cfg,
+        model_cfg=model_cfg,
+        target_sfreq=float(target_sfreq),
+        target_channel_names=target_channel_names,
+        logger=logger,
+    )
+
+
+def resolve_shared_epoch_mi_model(
+    *,
+    cache_name: str,
+    data_dir: str,
+    edf_glob: str,
+    calibrate_on_participant: str,
+    eeg_cfg: Any,
+    task_cfg: Any,
+    stim_cfg: Any,
+    model_cfg: Any,
+    target_sfreq: float,
+    target_channel_names: list[str] | tuple[str, ...],
+    logger: Any = None,
+) -> SharedMIModelResult:
+    runtime = get_active_runtime()
+    if runtime is not None and runtime.shared_epoch_mi_model is not None:
+        if logger is not None:
+            logger.info("Using orchestrator-provided shared epoch MI model.")
+        return runtime.shared_epoch_mi_model
 
     return train_or_load_shared_mi_model(
         cache_name=str(cache_name),
