@@ -648,13 +648,13 @@ class SubwayRunnerGame:
             jump_count = 0
 
             obstacles: list[dict] = []
+            game_start = pygame.time.get_ticks() / 1000.0
+            last_frame_t = game_start
             next_cluster_ready_t = game_start + 0.85
             score = 0
             passed = 0
             game_over = False
 
-            game_start = pygame.time.get_ticks() / 1000.0
-            last_frame_t = game_start
 
             while not game_over and self.running:
                 if self._poll_quit():

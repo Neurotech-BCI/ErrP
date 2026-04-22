@@ -242,7 +242,7 @@ class MICursorTaskConfig:
     # If True, tasks that opt in may smooth discrete signed left/right
     # decisions (-1 or +1) with the EMA command filter before applying
     # movement. This is currently used by lr_cursor_task and tetris_task.
-    enable_discrete_command_ema: bool = False
+    enable_discrete_command_ema: bool = True
     # Steering command mapping:
     # - "discrete_sign": use the biased left/right decision and map it to
     #   full-strength signed commands (-1 or +1) before smoothing.
@@ -273,7 +273,7 @@ class MICursorTaskConfig:
     target_radius: float = 0.110
     # Increase `target_min_distance_from_center` to force larger steering movements.
     # Decrease it to allow easier, nearer targets.
-    target_min_distance_from_center: float = 0.35
+    target_min_distance_from_center: float = 0.50
 
     # Steering control dynamics.
     # Increase `forward_speed_norm_s` to make the task faster and harder.
