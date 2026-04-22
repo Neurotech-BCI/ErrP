@@ -299,6 +299,10 @@ class MICursorTaskConfig:
     jaw_clench_prob_thresh: float = 0.70
     # Minimum time between accepted jaw-clench toggles.
     jaw_clench_refractory_s: float = 0.70
+    # Rapid eye-blink probability threshold for tasks that use blink events.
+    blink_prob_thresh: float = 0.70
+    # Minimum time between accepted rapid eye-blink events.
+    blink_refractory_s: float = 0.70
     # Number of long calibration blocks per jaw class (REST and CLENCH).
     jaw_calibration_blocks_per_class: int = 3
     # Preparation time before each jaw calibration trial.

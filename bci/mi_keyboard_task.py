@@ -20,13 +20,16 @@ from config import (
 )
 from bci_runtime import (
     apply_runtime_config_overrides,
-    resolve_runtime_jaw_classifier,
+    resolve_runtime_face_classifier,
     resolve_shared_mi_model,
 )
 from derick_ml_jawclench import (
-    run_visual_jaw_calibration,
+    JAW_CLENCH_CLASS_CODE,
+    RAPID_BLINK_CLASS_CODE,
+    REST_CLASS_CODE,
+    run_visual_face_event_calibration,
     select_jaw_channel_indices,
-    update_live_jaw_clench_state,
+    update_live_face_event_state,
 )
 from mental_command_worker import (
     StreamingIIRFilter,
@@ -67,7 +70,7 @@ def _prompt_prefix() -> str:
         print("Name cannot be empty.")
 
 
-def _build_virtual_keyboard(win: visual.Window) -> list[dict]:
+def _build_virtual_keyboard(win: visual.Window) -> tuple[list[dict], list[list[int]]]:
     rows = [
         ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
         ["A", "S", "D", "F", "G", "H", "J", "K", "L"],
@@ -88,13 +91,15 @@ def _build_virtual_keyboard(win: visual.Window) -> list[dict]:
     row_gap = 0.18
 
     keys: list[dict] = []
+    row_indices: list[list[int]] = []
     for row_idx, row in enumerate(rows):
         widths = [base_w * width_scale.get(label, 1.0) for label in row]
         total_w = float(np.sum(widths) + max(0, len(widths) - 1) * gap)
         x_left = -total_w / 2.0
         y = y_top - row_idx * row_gap
+        current_row: list[int] = []
 
-        for label, width in zip(row, widths):
+        for col_idx, (label, width) in enumerate(zip(row, widths)):
             x = x_left + width / 2.0
             rect = visual.Rect(
                 win,
@@ -112,10 +117,18 @@ def _build_virtual_keyboard(win: visual.Window) -> list[dict]:
                 height=0.045,
                 color=(0.93, 0.93, 0.93),
             )
-            keys.append({"label": label, "rect": rect, "text": text})
+            keys.append({
+                "label": label,
+                "rect": rect,
+                "text": text,
+                "row_idx": row_idx,
+                "col_idx": col_idx,
+            })
+            current_row.append(len(keys) - 1)
             x_left += width + gap
+        row_indices.append(current_row)
 
-    return keys
+    return keys, row_indices
 
 
 def _apply_key_to_buffer(current_text: str, key_label: str, max_chars: int) -> str:
@@ -171,7 +184,7 @@ def run_task(
     eeg_cfg = cfgs["eeg_cfg"]
 
     logger.info(
-        "Starting MI virtual keyboard | move_conf=%.2f cursor_step_s=%.3f jaw_select_refractory_s=%.2f",
+        "Starting MI virtual keyboard | move_conf=%.2f cursor_step_s=%.3f jaw_select_refractory_s=%.2f blink_row_switch=enabled",
         float(move_confidence_thresh),
         float(cursor_step_s),
         float(jaw_select_refractory_s),
@@ -264,22 +277,33 @@ def run_task(
 
     jaw_idxs = select_jaw_channel_indices(model_ch_names)
     jaw_window_n = int(round(float(task_cfg.jaw_window_s) * sfreq))
-    jaw_classifier = None
+    face_classifier = None
+    face_class_index: dict[int, int] | None = None
+    rest_prob = 0.0
     jaw_prob = 0.0
+    blink_prob = 0.0
+    face_pred_code = REST_CLASS_CODE
     jaw_prev_pred = 0
+    blink_prev_pred = 0
     jaw_event_pending = False
+    blink_event_pending = False
     jaw_last_select_t = -1e9
+    blink_last_row_t = -1e9
     jaw_prob_thresh = float(task_cfg.jaw_clench_prob_thresh)
+    blink_prob_thresh = float(getattr(task_cfg, "blink_prob_thresh", 0.70))
     jaw_refractory_s = max(float(task_cfg.jaw_clench_refractory_s), float(jaw_select_refractory_s))
+    blink_refractory_s = float(getattr(task_cfg, "blink_refractory_s", 0.70))
 
     logger.info(
-        "Jaw model config: channels=%s, jaw_window_s=%.2f, jaw_step_s=%.2f, trim_s=%.2f, threshold=%.2f, refractory_s=%.2f",
+        "Face-event model config: channels=%s, jaw_window_s=%.2f, jaw_step_s=%.2f, trim_s=%.2f, jaw_threshold=%.2f, blink_threshold=%.2f, jaw_refractory_s=%.2f, blink_refractory_s=%.2f",
         [model_ch_names[idx] for idx in jaw_idxs],
         float(task_cfg.jaw_window_s),
         float(task_cfg.jaw_window_step_s),
         float(task_cfg.jaw_calibration_trim_s),
         jaw_prob_thresh,
+        blink_prob_thresh,
         jaw_refractory_s,
+        blink_refractory_s,
     )
 
     win = visual.Window(
@@ -314,13 +338,33 @@ def run_task(
         wrapWidth=1.72,
     )
 
-    keys = _build_virtual_keyboard(win)
-    cursor_index = 0
+    keys, key_rows = _build_virtual_keyboard(win)
+    cursor_row = 0
+    cursor_col = 0
+    cursor_index = key_rows[cursor_row][cursor_col]
     typed_text = ""
+
+    def _sync_cursor() -> None:
+        nonlocal cursor_index, cursor_col
+        row = key_rows[cursor_row]
+        cursor_col = cursor_col % len(row)
+        cursor_index = row[cursor_col]
+
+    def _move_within_row(delta: int) -> None:
+        nonlocal cursor_col
+        row = key_rows[cursor_row]
+        cursor_col = (cursor_col + int(delta)) % len(row)
+        _sync_cursor()
+
+    def _move_down_row() -> None:
+        nonlocal cursor_row, cursor_col
+        cursor_row = (cursor_row + 1) % len(key_rows)
+        cursor_col = min(cursor_col, len(key_rows[cursor_row]) - 1)
+        _sync_cursor()
 
     def _draw_frame() -> None:
         text_box.draw()
-        typed_text_stim.text = typed_text if typed_text else "(jaw clench to select highlighted key)"
+        typed_text_stim.text = typed_text if typed_text else "(jaw clench selects highlighted key)"
         typed_text_stim.draw()
 
         for i, key in enumerate(keys):
@@ -374,12 +418,16 @@ def run_task(
             return np.empty((len(model_ch_names), 0), dtype=np.float32)
         return np.concatenate(chunks, axis=1).astype(np.float32, copy=False)
 
-    runtime_jaw_classifier, runtime_train_acc = resolve_runtime_jaw_classifier(logger=logger, min_total_samples=12)
-    if runtime_jaw_classifier is not None:
-        jaw_classifier = runtime_jaw_classifier
-        jaw_train_acc = float(runtime_train_acc or 0.0)
+    runtime_face_classifier, runtime_train_acc, runtime_counts = resolve_runtime_face_classifier(
+        logger=logger,
+        min_total_samples=18,
+    )
+    if runtime_face_classifier is not None:
+        face_classifier = runtime_face_classifier
+        face_train_acc = float(runtime_train_acc or 0.0)
+        face_counts = runtime_counts or {}
     else:
-        jaw_classifier, jaw_train_acc, _jaw_y = run_visual_jaw_calibration(
+        face_classifier, face_train_acc, _face_y, face_counts = run_visual_face_event_calibration(
             cue=cue,
             info=info,
             status=status,
@@ -398,12 +446,34 @@ def run_task(
             window_s=float(task_cfg.jaw_window_s),
             step_s=float(task_cfg.jaw_window_step_s),
             edge_trim_s=float(task_cfg.jaw_calibration_trim_s),
-            min_total_samples=12,
+            min_total_samples=18,
+            ready_info_text=None,
+            ready_status_text="Jaw clench selects keys. Rapid eye blinks move down one row. Press SPACE to start.",
         )
-    logger.info("Jaw classifier ready: train_acc=%.3f", float(jaw_train_acc))
+    with open(f"{fname}_mi_keyboard_face_event_model.pkl", "wb") as fh:
+        pickle.dump(face_classifier, fh)
+
+    face_classes = np.asarray(getattr(face_classifier, "classes_", []), dtype=int)
+    if face_classes.size == 0 and hasattr(face_classifier, "named_steps") and "clf" in face_classifier.named_steps:
+        face_classes = np.asarray(face_classifier.named_steps["clf"].classes_, dtype=int)
+    if face_classes.size == 0:
+        raise RuntimeError("Face-event classifier has no classes_ after calibration.")
+    face_class_index = {int(c): i for i, c in enumerate(face_classes)}
+    for needed in (REST_CLASS_CODE, JAW_CLENCH_CLASS_CODE, RAPID_BLINK_CLASS_CODE):
+        if int(needed) not in face_class_index:
+            raise RuntimeError(
+                "Face-event classifier is missing required classes. "
+                f"Found {face_classes.tolist()}, required {[REST_CLASS_CODE, JAW_CLENCH_CLASS_CODE, RAPID_BLINK_CLASS_CODE]}"
+            )
+
+    logger.info(
+        "Face-event classifier ready: train_acc=%.3f, counts=%s",
+        float(face_train_acc),
+        face_counts,
+    )
 
     cue.text = "Ready"
-    info.text = "Imagine LEFT/RIGHT to move cursor. Jaw clench to select highlighted key."
+    info.text = "LEFT/RIGHT imagery moves within the active row. Rapid eye blinks move down one row. Jaw clench selects the highlighted key."
     status.text = "Press SPACE to start live keyboard control. ESC to quit."
     _wait_for_space("Ready")
 
@@ -419,7 +489,7 @@ def run_task(
     reject_thresh = eeg_cfg.reject_peak_to_peak
     last_live_ts: float | None = None
 
-    jaw_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
+    face_buffer = np.empty((len(model_ch_names), 0), dtype=np.float32)
 
     pred_clock = core.Clock()
     prediction_count = 0
@@ -433,8 +503,10 @@ def run_task(
 
     last_move_t = -1e9
     def _pull_stream_and_update_buffers() -> None:
-        nonlocal last_live_ts, live_buffer, jaw_buffer
-        nonlocal jaw_prob, jaw_prev_pred, jaw_event_pending, jaw_last_select_t
+        nonlocal last_live_ts, live_buffer, face_buffer
+        nonlocal rest_prob, jaw_prob, blink_prob, face_pred_code
+        nonlocal jaw_prev_pred, blink_prev_pred, jaw_event_pending, blink_event_pending
+        nonlocal jaw_last_select_t, blink_last_row_t
 
         data, ts = stream.get_data(winsize=stream_pull_s, picks="all")
         if data.size == 0 or ts is None or len(ts) == 0:
@@ -454,28 +526,45 @@ def run_task(
         if live_buffer.shape[1] > keep_n:
             live_buffer = live_buffer[:, -keep_n:]
 
-        jaw_buffer, jaw_prob, jaw_prev_pred, should_select = update_live_jaw_clench_state(
-            jaw_buffer=jaw_buffer,
+        face_buffer, rest_prob, jaw_prob, blink_prob, face_pred_code, jaw_prev_pred, blink_prev_pred, should_select, should_row_switch = update_live_face_event_state(
+            face_buffer=face_buffer,
             x_new=x_new,
             keep_n=keep_n,
             jaw_window_n=jaw_window_n,
-            jaw_classifier=jaw_classifier,
+            face_classifier=face_classifier,
+            class_index=face_class_index,
             jaw_idxs=jaw_idxs,
+            rest_prob=rest_prob,
             jaw_prob=jaw_prob,
+            blink_prob=blink_prob,
             jaw_prev_pred=jaw_prev_pred,
+            blink_prev_pred=blink_prev_pred,
             jaw_prob_thresh=jaw_prob_thresh,
-            jaw_last_toggle_t=jaw_last_select_t,
+            blink_prob_thresh=blink_prob_thresh,
+            jaw_last_event_t=jaw_last_select_t,
+            blink_last_event_t=blink_last_row_t,
             jaw_refractory_s=jaw_refractory_s,
+            blink_refractory_s=blink_refractory_s,
             now_t=core.getTime(),
         )
         if should_select:
             jaw_last_select_t = core.getTime()
             jaw_event_pending = True
+        if should_row_switch:
+            blink_last_row_t = core.getTime()
+            blink_event_pending = True
 
     def _poll_jaw_clench() -> bool:
         nonlocal jaw_event_pending
         if jaw_event_pending:
             jaw_event_pending = False
+            return True
+        return False
+
+    def _poll_blink() -> bool:
+        nonlocal blink_event_pending
+        if blink_event_pending:
+            blink_event_pending = False
             return True
         return False
 
@@ -533,19 +622,32 @@ def run_task(
             conf = max(left_prob, right_prob)
 
             move_text = ""
-            if latest_pred_code is not None and conf >= float(move_confidence_thresh):
+            if _poll_blink():
+                _move_down_row()
+                move_text = "row DOWN"
+                logger.info(
+                    "%s | row=%d col=%d key=%s | blink_p=%.3f",
+                    move_text,
+                    cursor_row,
+                    cursor_col,
+                    keys[cursor_index]["label"],
+                    blink_prob,
+                )
+            elif latest_pred_code is not None and conf >= float(move_confidence_thresh):
                 if (now_t - last_move_t) >= float(cursor_step_s):
                     if latest_pred_code == int(stim_cfg.left_code):
-                        cursor_index = (cursor_index - 1) % len(keys)
+                        _move_within_row(-1)
                         move_text = "cursor LEFT"
                     elif latest_pred_code == int(stim_cfg.right_code):
-                        cursor_index = (cursor_index + 1) % len(keys)
+                        _move_within_row(1)
                         move_text = "cursor RIGHT"
                     last_move_t = now_t
                     if move_text:
                         logger.info(
-                            "%s | key=%s | left=%.3f right=%.3f conf=%.3f",
+                            "%s | row=%d col=%d key=%s | left=%.3f right=%.3f conf=%.3f",
                             move_text,
+                            cursor_row,
+                            cursor_col,
                             keys[cursor_index]["label"],
                             left_prob,
                             right_prob,
@@ -579,13 +681,15 @@ def run_task(
                     jaw_prob,
                 )
 
-            cue.text = "LEFT/RIGHT MI moves cursor when confidence threshold is met. Jaw clench selects key."
+            cue.text = "LEFT/RIGHT MI cycles within row. Rapid eye blink moves down one row. Jaw clench selects key."
             info.text = (
                 f"{label_cfg.left_name}={left_prob:.2f}   {label_cfg.right_name}={right_prob:.2f}   "
-                f"conf={conf:.2f}   raw={raw_command:+.2f}   ema={ema_command:+.2f}   jaw={jaw_prob:.2f}"
+                f"conf={conf:.2f}   raw={raw_command:+.2f}   ema={ema_command:+.2f}   "
+                f"rest={rest_prob:.2f}   jaw={jaw_prob:.2f}   blink={blink_prob:.2f}"
             )
             status.text = (
-                f"key={keys[cursor_index]['label']}   pred={latest_pred_code}   updates={prediction_count}   "
+                f"row={cursor_row + 1}/{len(key_rows)}   col={cursor_col + 1}   key={keys[cursor_index]['label']}   "
+                f"pred={latest_pred_code}   face_pred={face_pred_code}   updates={prediction_count}   "
                 f"{live_note}   {move_text} {selected_text}"
             )
             _draw_frame()
@@ -609,7 +713,9 @@ def run_task(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Left/right MI + jaw clench virtual keyboard")
+    parser = argparse.ArgumentParser(
+        description="Left/right MI virtual keyboard with jaw select and blink row switching"
+    )
     parser.add_argument(
         "--move-confidence-thresh",
         type=float,

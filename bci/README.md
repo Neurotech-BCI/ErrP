@@ -103,7 +103,8 @@ The orchestrator prepares shared resources once at startup:
 - Jaw calibration:
   - runs only if at least one jaw-using task is in the sequence
 - Jaw + blink calibration:
-  - runs only if `real_cursor` is in the sequence
+  - runs if `real_cursor`, `mi_keyboard_task`, or `tetris_task` is in the sequence
+  - also runs when `hinge_task` is in the sequence with keyboard follow-up enabled, because the nested keyboard stage uses blink + jaw commands
 
 The special-command calibration data are collected once, then each task fits the classifier it needs from that shared calibration set.
 

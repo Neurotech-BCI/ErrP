@@ -354,6 +354,9 @@ def run_visual_face_event_calibration(
     step_s: float = 0.10,
     edge_trim_s: float = 0.5,
     min_total_samples: int = 18,
+    ready_cue_text: str = "Calibration complete",
+    ready_info_text: str | None = None,
+    ready_status_text: str | None = None,
 ) -> tuple[Pipeline, float, np.ndarray, dict[int, int]]:
     """Run PsychoPy visual calibration for REST/JAW CLENCH/RAPID BLINK."""
     original_layout = {
@@ -452,10 +455,18 @@ def run_visual_face_event_calibration(
             float(edge_trim_s),
         )
 
-        cue.text = "Calibration complete"
-        info.text = f"Face-event classifier ready (train acc {train_acc:.2f})"
-        status.text = "Rapid eye blinks toggle direction. Jaw clench performs click. Press SPACE to start."
-        wait_for_space("Calibration complete")
+        cue.text = str(ready_cue_text)
+        info.text = (
+            str(ready_info_text)
+            if ready_info_text is not None
+            else f"Face-event classifier ready (train acc {train_acc:.2f})"
+        )
+        status.text = (
+            str(ready_status_text)
+            if ready_status_text is not None
+            else "Rapid eye blinks toggle direction. Jaw clench performs click. Press SPACE to start."
+        )
+        wait_for_space(str(ready_cue_text))
         return face_classifier, train_acc, y_np, class_counts
     finally:
         cue.pos = original_layout["cue_pos"]

@@ -47,7 +47,7 @@ JAW_TASKS = {
     "subway_runner_task",
     "tetris_task",
 }
-FACE_TASKS = {"real_cursor"}
+FACE_TASKS = {"mi_keyboard_task", "real_cursor", "tetris_task"}
 
 
 def _load_config(config_module: str, config_name: str) -> BCIOrchestratorConfig:
@@ -64,6 +64,15 @@ def _task_requires_jaw(task_name: str) -> bool:
 
 def _task_requires_face(task_name: str) -> bool:
     return str(task_name) in FACE_TASKS
+
+
+def _hinge_requires_face(runtime: BCIOrchestratorRuntime) -> bool:
+    cfgs = _apply_overrides(
+        runtime,
+        "hinge_task",
+        task_cfg=HingeTaskConfig(),
+    )
+    return bool(cfgs["task_cfg"].enable_keyboard_on_match)
 
 
 def _build_task_prefix(participant: str, task_name: str, repeat_idx: int, repeats: int) -> str:
@@ -323,10 +332,13 @@ def run_orchestrated_session(cfg: BCIOrchestratorConfig) -> None:
         task_names = [item.task_name for item in cfg.task_sequence]
         if "hinge_task" in task_names:
             _prepare_shared_epoch_mi_model(runtime)
+        needs_blinks = any(_task_requires_face(name) for name in task_names)
+        if "hinge_task" in task_names and _hinge_requires_face(runtime):
+            needs_blinks = True
         if any(_task_requires_jaw(name) for name in task_names):
             runtime.face_calibration = _collect_special_calibration(
                 runtime,
-                include_blinks=any(_task_requires_face(name) for name in task_names),
+                include_blinks=bool(needs_blinks),
             )
 
         for item_cfg in cfg.task_sequence:

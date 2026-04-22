@@ -259,10 +259,10 @@ def run_task(fname: str, pixels_per_update: int = 30, dry_run: bool = False) -> 
 	blink_prob = 0.0
 	jaw_prev_pred = 0
 	blink_prev_pred = 0
-	jaw_prob_thresh = 0.70
-	blink_prob_thresh = 0.70
-	jaw_refractory_s = 0.70
-	blink_refractory_s = 0.70
+	jaw_prob_thresh = float(task_cfg.jaw_clench_prob_thresh)
+	blink_prob_thresh = float(getattr(task_cfg, "blink_prob_thresh", 0.70))
+	jaw_refractory_s = float(task_cfg.jaw_clench_refractory_s)
+	blink_refractory_s = float(getattr(task_cfg, "blink_refractory_s", 0.70))
 	jaw_last_toggle_t = -1e9
 	blink_last_toggle_t = -1e9
 
