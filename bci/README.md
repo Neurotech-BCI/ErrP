@@ -30,11 +30,11 @@ Supported task names:
 - `jaw_pause_cursor_task`
 - `knob_task`
 - `lr_cursor_task`
+- `mi_racing_task`
 - `mental_command_task`
 - `mi_cursor_task`
 - `mi_keyboard_task`
 - `real_cursor`
-- `subway_runner_task`
 - `tetris_task`
 
 Notes:
