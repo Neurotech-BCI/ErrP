@@ -520,7 +520,6 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
             ]
             if int(task_cfg.rest_class_code) in class_index:
                 parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
-            parts.extend([f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", live_note])
             info.text = "   ".join(parts)
             status.text = (
                 f"Score: {successful_trials}/{completed_trials}   "
@@ -549,23 +548,34 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
             ]
             if int(task_cfg.rest_class_code) in class_index:
                 parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
-            parts.extend([f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", "startup delay"])
             info.text = "   ".join(parts)
             status.text = (
                 f"Score: {successful_trials}/{completed_trials}   "
-                f"Trial starts in {remaining:.1f}s"
+                f"startup delay   {remaining:.1f}s"
             )
             _draw_frame()
+
+    def _show_completion_screen() -> None:
+        success_rate = 100.0 * float(successful_trials) / max(float(completed_trials), 1.0)
+        cue.text = "Session complete"
+        info.text = f"Success rate: {success_rate:.1f}%   ({successful_trials}/{completed_trials})"
+        status.text = "Press ESC to exit task."
+        while True:
+            _draw_frame()
+            if "escape" in event.getKeys():
+                return
 
     trial_results: list[dict[str, float | int | tuple[float, float]]] = []
     completed_trials = 0
     successful_trials = 0
     last_frame_t = core.getTime()
+    show_completion_screen = False
 
     try:
         while True:
             if max_trials is not None and completed_trials >= int(max_trials):
                 logger.info("Reached max_trials=%d; ending task.", int(max_trials))
+                show_completion_screen = True
                 break
             _reset_trial_state()
             target.fillColor = target_color
@@ -641,18 +651,12 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
                 ]
                 if int(task_cfg.rest_class_code) in class_index:
                     parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
-                parts.extend([
-                    f"pred={latest_pred_code}",
-                    f"raw={raw_command:+.2f}",
-                    f"ema={ema_command:+.2f}",
-                    f"bias={bias_offset:+.2f}",
-                ])
                 info.text = "   ".join(parts)
                 status.text = (
                     f"score={successful_trials}/{completed_trials}   "
                     f"time={trial_clock.getTime():.1f}s   "
                     f"distance={distance_to_target:.2f}   "
-                    f"updates={prediction_count - trial_pred_start}   {live_note}"
+                    f"{live_note}"
                 )
                 _draw_frame()
 
@@ -690,8 +694,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
                         _poll_live_decoder()
                         cue.text = "Target reached" if trial_success else "Hit mirrored fail line"
                         info.text = (
-                            f"time={trial_duration:.1f}s   path={path_length:.2f}   "
-                            f"updates={prediction_count - trial_pred_start}   "
+                            f"time={trial_duration:.1f}s   "
                             f"score={successful_trials}/{completed_trials}"
                         )
                         status.text = (
@@ -705,6 +708,8 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
     except KeyboardInterrupt:
         logger.info("Session interrupted by user.")
     finally:
+        if show_completion_screen and completed_trials > 0:
+            _show_completion_screen()
         if classifier is not None and trial_results:
             with open(f"{fname}_lr_cursor_trials.pkl", "wb") as fh:
                 pickle.dump(trial_results, fh)

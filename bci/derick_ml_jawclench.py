@@ -394,7 +394,7 @@ def collect_visual_face_event_feature_rows(
             cue.text = trial_name
             info.text = instruction
             if float(cue_offset_s) > 0.0:
-                status.text = f"Begin after {float(cue_offset_s):.1f}s. Capture lasts {float(hold_s):.1f}s"
+                status.text = f"Capture lasts {float(hold_s):.1f}s"
             else:
                 status.text = f"Hold for {float(hold_s):.1f}s"
             block = collect_stream_block(float(hold_s))
@@ -517,7 +517,7 @@ def run_visual_face_event_calibration(
             cue.text = trial_name
             info.text = instruction
             if float(cue_offset_s) > 0.0:
-                status.text = f"Begin after {float(cue_offset_s):.1f}s. Capture lasts {float(hold_s):.1f}s"
+                status.text = f"Capture lasts {float(hold_s):.1f}s"
             else:
                 status.text = f"Hold for {float(hold_s):.1f}s"
             block = collect_stream_block(float(hold_s))
@@ -659,7 +659,7 @@ def run_visual_jaw_calibration(
                 "Clench jaw and hold." if is_clench else "Relax face and avoid blinking/movement."
             )
             if float(cue_offset_s) > 0.0:
-                status.text = f"Begin after {float(cue_offset_s):.1f}s. Capture lasts {float(hold_s):.1f}s"
+                status.text = f"Capture lasts {float(hold_s):.1f}s"
             else:
                 status.text = f"Hold for {float(hold_s):.1f}s"
             block = collect_stream_block(float(hold_s))

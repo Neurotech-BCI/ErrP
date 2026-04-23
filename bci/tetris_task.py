@@ -840,21 +840,17 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
             last_move_t = now
         return moved
 
-    def _show_game_over(board: TetrisBoard, *, piece_limit_reached: bool = False) -> bool:
+    def _show_game_over(board: TetrisBoard, *, piece_limit_reached: bool = False) -> None:
         body = (
             f"PIECE LIMIT REACHED\n\n"
-            f"Score: {board.score}\n"
-            f"Lines: {board.lines}  Level: {board.level}\n"
-            f"Pieces: {board.pieces_locked}"
+            f"Pieces placed: {board.pieces_locked}"
         ) if piece_limit_reached else (
             f"GAME OVER\n\n"
-            f"Score: {board.score}\n"
-            f"Lines: {board.lines}  Level: {board.level}\n"
-            f"Pieces: {board.pieces_locked}"
+            f"Pieces placed: {board.pieces_locked}"
         )
         go_txt = visual.TextStim(
             win,
-            text=(body + "\n\nSPACE to play again   ESC to quit"),
+            text=(body + "\n\nPress ESC to exit task."),
             pos=(0, 0),
             height=0.08,
             color=(0.95, 0.25, 0.25),
@@ -865,9 +861,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
             win.flip()
             keys = event.getKeys()
             if "escape" in keys:
-                return False
-            if "space" in keys:
-                return True
+                return
 
     max_pieces = int(max_trials) if max_trials is not None else None
     total_pieces_locked = 0
@@ -941,22 +935,14 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
                     ]
                     if int(task_cfg.rest_class_code) in (class_index or {}):
                         parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
-                    parts.extend([f"jaw={jaw_prob:.2f}", f"blink={blink_prob:.2f}", f"cmd={ema_command:+.2f}", f"bias={bias_offset:+.2f}", live_note])
+                    parts.extend([f"jaw={jaw_prob:.2f}", f"blink={blink_prob:.2f}", live_note])
                     txt_bci.text = "   ".join(parts)
                     txt_cue.text = "LEFT/RIGHT imagery → move  |  Eye blink → rotate  |  Jaw clench → hard drop"
                     session_pieces_locked = game_start_pieces + board.pieces_locked
                     if max_pieces is None:
-                        txt_status.text = (
-                            f"Predictions: {prediction_count}   face_pred={face_pred_code}   "
-                            f"jaw={jaw_prob:.2f}   blink={blink_prob:.2f}   "
-                            f"pieces={session_pieces_locked}"
-                        )
+                        txt_status.text = f"Pieces: {session_pieces_locked}"
                     else:
-                        txt_status.text = (
-                            f"Predictions: {prediction_count}   face_pred={face_pred_code}   "
-                            f"jaw={jaw_prob:.2f}   blink={blink_prob:.2f}   "
-                            f"pieces={session_pieces_locked}/{max_pieces}"
-                        )
+                        txt_status.text = f"Pieces: {session_pieces_locked}/{max_pieces}"
 
                     _draw_frame(board)
 
@@ -1000,8 +986,8 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
                 total_pieces_locked,
             )
 
-            if not _show_game_over(board, piece_limit_reached=piece_limit_reached):
-                break
+            _show_game_over(board, piece_limit_reached=piece_limit_reached)
+            break
 
     finally:
         if session_stats:
