@@ -896,6 +896,23 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
         ui.set_overlay(overlay, alpha=overlay_alpha)
         ui.render()
 
+    def _show_completion_screen() -> None:
+        if ui is None:
+            return
+        left_swipes = sum(1 for result in trial_results if str(result.get("swipe_direction")) == "left")
+        right_swipes = sum(1 for result in trial_results if str(result.get("swipe_direction")) == "right")
+        ui.profile_visible = False
+        ui.set_overlay(None, alpha=0.0)
+        ui.set_status(
+            "Session complete",
+            f"Swiped left: {left_swipes}   Swiped right: {right_swipes}",
+            "Press ESC to exit task.",
+        )
+        while True:
+            ui.render()
+            if "escape" in ui.consume_keys():
+                return
+
     try:
         stream, sfreq, model_ch_names, missing = _open_stream(lsl_cfg, eeg_cfg)
         logger.info("Connected hinge stream: sfreq=%.3f selected=%s missing=%s", sfreq, model_ch_names, missing)
@@ -1165,11 +1182,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
                 overlay_alpha = 1.0 - 0.45 * progress
                 _draw(
                     command="Match!" if swipe_direction == "right" else "Pass",
-                    sub=(
-                        f"Decoded RIGHT  p_right={right_prob:.2f} p_left={left_prob:.2f}"
-                        if swipe_direction == "right"
-                        else f"Decoded LEFT  p_left={left_prob:.2f} p_right={right_prob:.2f}"
-                    ),
+                    sub="Swipe decoded: RIGHT" if swipe_direction == "right" else "Swipe decoded: LEFT",
                     overlay=swipe_direction,
                     overlay_alpha=overlay_alpha,
                 )
@@ -1218,6 +1231,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:  # noqa: C901
                 if ui is not None:
                     ui.render()
 
+        _show_completion_screen()
         with open(f"{fname}_hinge_trials.pkl", "wb") as fh:
             pickle.dump(trial_results, fh)
         logger.info("Saved %d hinge trials to %s_hinge_trials.pkl", len(trial_results), fname)

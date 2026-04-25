@@ -689,13 +689,10 @@ def run_task(
             cue.text = "LEFT/RIGHT MI cycles within row. Rapid eye blink moves down one row. Jaw clench selects key."
             info.text = (
                 f"{label_cfg.left_name}={left_prob:.2f}   {label_cfg.right_name}={right_prob:.2f}   "
-                f"conf={conf:.2f}   raw={raw_command:+.2f}   ema={ema_command:+.2f}   "
                 f"rest={rest_prob:.2f}   jaw={jaw_prob:.2f}   blink={blink_prob:.2f}"
             )
             status.text = (
-                f"row={cursor_row + 1}/{len(key_rows)}   col={cursor_col + 1}   key={keys[cursor_index]['label']}   "
-                f"pred={latest_pred_code}   face_pred={face_pred_code}   updates={prediction_count}   "
-                f"{live_note}   {move_text} {selected_text}"
+                f"{live_note}   {move_text} {selected_text}".strip()
             )
             _draw_frame()
 

@@ -624,13 +624,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
                 parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
             if bool(task_cfg.enable_jaw_clench_pause):
                 parts.append(f"jaw={jaw_prob:.2f}")
-            parts.extend([
-                f"score={decision_score:+.2f}",
-                f"cmd={ema_command:+.2f}",
-                f"bias={bias_offset:+.2f}",
-                f"mode={control_mode}",
-                live_note,
-            ])
+            parts.append(live_note)
             info.text = "   ".join(parts)
             _draw_frame()
             keys = event.getKeys()
@@ -657,24 +651,33 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
                 parts.append(f"{label_cfg.rest_name}: {rest_prob:.2f}")
             if bool(task_cfg.enable_jaw_clench_pause):
                 parts.append(f"jaw={jaw_prob:.2f}")
-            parts.extend([
-                f"score={decision_score:+.2f}",
-                f"cmd={ema_command:+.2f}",
-                f"bias={bias_offset:+.2f}",
-                f"mode={control_mode}",
-                "startup delay",
-            ])
+            parts.append("startup delay")
             info.text = "   ".join(parts)
             _draw_frame()
+
+    def _show_completion_screen() -> None:
+        if trial_results:
+            avg_time_s = float(np.mean([float(result["duration_s"]) for result in trial_results]))
+            info.text = f"Average time per trial: {avg_time_s:.2f}s"
+        else:
+            info.text = "No completed trials."
+        cue.text = "Session complete"
+        status.text = "Press ESC to close."
+        while True:
+            _draw_frame()
+            if "escape" in event.getKeys():
+                return
 
     trial_results: list[dict[str, float | int | tuple[float, float]]] = []
     completed_trials = 0
     last_frame_t = core.getTime()
+    show_completion_screen = False
 
     try:
         while True:
             if max_trials is not None and completed_trials >= int(max_trials):
                 logger.info("Reached max_trials=%d; ending task.", int(max_trials))
+                show_completion_screen = True
                 break
             _reset_trial_state()
             target.fillColor = target_color
@@ -765,19 +768,14 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
                 if bool(task_cfg.enable_jaw_clench_pause):
                     parts.append(f"jaw={jaw_prob:.2f}")
                 parts.extend([
-                    f"score={decision_score:+.2f}",
-                    f"raw={raw_command:+.2f}",
-                    f"ema={ema_command:+.2f}",
-                    f"bias={bias_offset:+.2f}",
                     f"steer={steering_state:+.2f}",
-                    f"mode={control_mode}",
                     "moving" if movement_enabled else "paused",
                 ])
                 info.text = "   ".join(parts)
                 status.text = (
                     f"time={trial_clock.getTime():.1f}s   "
                     f"distance={distance_to_target:.2f}   "
-                    f"updates={prediction_count - trial_pred_start}   {live_note}"
+                    f"{live_note}"
                 )
                 _draw_frame()
 
@@ -805,8 +803,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
                         _poll_live_decoder()
                         cue.text = "Target reached"
                         info.text = (
-                            f"time={trial_duration:.1f}s   path={path_length:.2f}   "
-                            f"updates={prediction_count - trial_pred_start}"
+                            f"time={trial_duration:.1f}s   path={path_length:.2f}"
                         )
                         status.text = "Press SPACE for the next target after the pause."
                         _draw_frame()
@@ -816,6 +813,8 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
     except KeyboardInterrupt:
         logger.info("Session interrupted by user.")
     finally:
+        if show_completion_screen:
+            _show_completion_screen()
         if classifier is not None and trial_results:
             with open(f"{fname}_mi_cursor_trials.pkl", "wb") as fh:
                 pickle.dump(trial_results, fh)

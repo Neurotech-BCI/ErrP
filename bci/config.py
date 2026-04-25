@@ -566,7 +566,7 @@ class HingeTaskConfig:
     enable_keyboard_on_match: bool = True
     keyboard_move_confidence_thresh: float = 0.60
     keyboard_cursor_step_s: float = 0.70
-    keyboard_jaw_select_refractory_s: float = 0.35
+    keyboard_jaw_select_refractory_s: float = 1.0
     keyboard_max_text_chars: int = 320
 
     # Full-epoch swipe model should remain unbiased.
