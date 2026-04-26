@@ -322,6 +322,7 @@ class MICursorTaskConfig:
     jaw_window_step_s: float = 0.10
 
     calirate_on_participant: str = "mi"
+    target_seed: int = 42
 
 @dataclass(frozen=True)
 class LiveMITaskConfig:
