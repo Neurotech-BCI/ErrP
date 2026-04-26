@@ -34,8 +34,7 @@ class StimConfig:
 
 @dataclass(frozen=True)
 class EEGConfig:
-    #picks: tuple[str, ...] = ("Pz", "F4", "C4", "P4", "P3", "C3", "F3")
-    picks: tuple[str, ...] = ("Pz", "F4", "C4", "P4", "C3", "F3")
+    picks: tuple[str, ...] = ("Pz", "F4", "C4", "P4", "P3", "C3", "F3")
     #picks: tuple[str, ...] = ("C4", "C3")
 
     # Optional reference channel to apply consistently to offline EDFs and
@@ -304,7 +303,7 @@ class MICursorTaskConfig:
     # Minimum time between accepted rapid eye-blink events.
     blink_refractory_s: float = 0.70
     # Number of long calibration blocks per jaw class (REST and CLENCH).
-    jaw_calibration_blocks_per_class: int = 3
+    jaw_calibration_blocks_per_class: int = 1
     # Preparation time before each jaw calibration trial.
     jaw_calibration_prep_s: float = 2.5
     # Delay after cue onset before the calibration block begins, giving the
