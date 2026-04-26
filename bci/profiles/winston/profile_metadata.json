@@ -1,0 +1,14 @@
+{
+    "name": "Winston Luk",
+    "occupation": "Rat Surgeon",
+    "age": 23,
+    "dating_intentions": "It's complicated",
+    "prompt_1": {
+        "prompt": "I'll fall for you if",
+        "response": "You can make my cat chill out"
+    },
+    "prompt_2": {
+        "prompt": "Unusual skills",
+        "response": "Losing at Smash Bros"
+    }
+}

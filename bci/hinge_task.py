@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 from mne_lsl.stream import StreamLSL
+from PIL import Image, ImageOps
 from psychopy import core, event, visual
 
 from bci_runtime import (
@@ -352,7 +353,9 @@ class HongePygameUI:
     def _load_cover(self, image_path: str, size: tuple[int, int]):
         pygame = self.pygame
         target_w, target_h = int(size[0]), int(size[1])
-        surf = pygame.image.load(image_path).convert()
+        pil_img = Image.open(image_path)
+        pil_img = ImageOps.exif_transpose(pil_img).convert("RGB")
+        surf = pygame.image.fromstring(pil_img.tobytes(), pil_img.size, pil_img.mode).convert()
         scale = max(target_w / surf.get_width(), target_h / surf.get_height())
         scaled = pygame.transform.smoothscale(
             surf,
