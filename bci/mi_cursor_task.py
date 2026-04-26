@@ -150,7 +150,7 @@ def run_task(fname: str, max_trials: int | None = None) -> None:
     model_cfg = cfgs["model_cfg"]
     eeg_cfg = cfgs["eeg_cfg"]
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed=task_cfg.target_seed)
 
     stream = StreamLSL(
         bufsize=60.0,
