@@ -4,14 +4,17 @@ import time
 import serial
 
 # --- Configuration ---
-WIN_SIZE = [1200, 800]
+WIN_SIZE =[1200, 800]
 CURSOR_SIZE = 15
 TARGET_SIZE = 40
 
 # Movement Settings
 STEP_SIZE = 60                   # Distance of one "move"
 TARGET_DISTANCE = 5 * STEP_SIZE  # Target is 5 steps away
-MOVE_DURATION = 1.25             # Seconds it takes to glide to next point (Continuous movement)
+
+# --- CHANGED: Now acts as a "cooldown" so the user doesn't mash keys, 
+# giving you a clean 800ms window to record the ErrP!
+COOLDOWN_DURATION = 0.8          
 
 # Error Parameters
 ERROR_PROB = 0.25
@@ -28,9 +31,13 @@ TOWARD_TARGET_ERROR_TRIGGER = 2       # error movement still reduced distance to
 PERPENDICULAR_ERROR_TRIGGER = 3       # perpendicular error that does NOT reduce distance
 OPPOSITE_ERROR_TRIGGER = 4            # opposite error (away from intended direction)
 
-mmbts = serial.Serial()
-mmbts.port = PORT
-mmbts.open()
+try:
+    mmbts = serial.Serial()
+    mmbts.port = PORT
+    mmbts.open()
+except:
+    print("Warning: Trigger hub not connected.")
+    mmbts = None
 
 # --- Setup ---
 win = visual.Window(size=WIN_SIZE, units='pix', color='black')
@@ -144,33 +151,36 @@ for trial_i in range(N_TRIALS):
                     trigger_to_send = PERPENDICULAR_ERROR_TRIGGER
                 else:
                     trigger_to_send = OPPOSITE_ERROR_TRIGGER
+                    
         # --- Final Destination (with boundary clamp) ---
         end_pos = start_pos + move_vec
         end_pos[0] = np.clip(end_pos[0], -WIN_SIZE[0] // 2, WIN_SIZE[0] // 2)
         end_pos[1] = np.clip(end_pos[1], -WIN_SIZE[1] // 2, WIN_SIZE[1] // 2)
 
-        # Queue trigger to be sent on the very next screen flip (i.e., movement onset)
-        win.callOnFlip(mmbts.write, bytes([trigger_to_send]))
-
-        # --- Animate Movement (Visual) ---
-        animation_clock = core.Clock()
-        while animation_clock.getTime() < MOVE_DURATION:
-            t = animation_clock.getTime() / MOVE_DURATION
-
-            current_x = start_pos[0] + (end_pos[0] - start_pos[0]) * t
-            current_y = start_pos[1] + (end_pos[1] - start_pos[1]) * t
-            cursor.pos = (current_x, current_y)
-
-            target.draw()
-            cursor.draw()
-            instr.draw()
-            win.flip()
-
-        # Ensure final position is exact
+        # --- CHANGED: Instantaneous Movement ---
+        # Instead of slowly animating, we instantly update the position.
         cursor.pos = end_pos
 
-        # --- Check Success (Proper Circle-Rectangle Collision) ---
+        target.draw()
+        cursor.draw()
+        instr.draw()
 
+        # Queue trigger to be sent on the exact screen flip where the visual jump happens
+        if mmbts:
+            win.callOnFlip(mmbts.write, bytes([trigger_to_send]))
+        
+        # Draw to screen! The user is instantly surprised here.
+        win.flip()
+
+        # Wait during the cooldown duration so they can't mash the next key.
+        # This gives their brain 800ms to register the error, and gives the LSL 
+        # stream 800ms of completely clean EEG without motor-planning interference.
+        core.wait(COOLDOWN_DURATION)
+
+        # Clear event buffer in case they mashed keys during the cooldown
+        event.clearEvents()
+
+        # --- Check Success (Proper Circle-Rectangle Collision) ---
         cursor_center = np.array(cursor.pos, dtype=float)
         target_center = np.array(target.pos, dtype=float)
 
@@ -201,4 +211,6 @@ for trial_i in range(N_TRIALS):
                 win.flip()
 
 # --- End ---
+if mmbts:
+    mmbts.close()
 win.close()
